@@ -67,12 +67,36 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          # bundle the CUDA runtime DLLs so the artifact runs with only the NVIDIA driver
-          # (the build targets CUDA 13.1; the local machine may have a different toolkit)
-          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${env:CUDA_VERSION}\bin"
-          Copy-Item "$cudaBin\cudart64_*.dll","$cudaBin\cublas64_*.dll","$cudaBin\cublasLt64_*.dll" .\build\bin\Release\ -ErrorAction SilentlyContinue
-          $out = "llama-win-cuda${env:CUDA_VERSION}-sm120-x64.zip"
-          7z a -snl $out .\build\bin\Release\*.exe .\build\bin\Release\*.dll
+          $rel = ".\build\bin\Release"
+
+          # Bundle the CUDA runtime DLLs so the package runs with only the NVIDIA driver
+          # installed (no CUDA toolkit needed). Search the installed toolkit recursively —
+          # CUDA_PATH is set by the windows-setup-cuda action; fall back to the versioned dir.
+          $cudaRoot = $env:CUDA_PATH
+          if (-not $cudaRoot) { $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$($env:CUDA_VERSION)" }
+          Write-Host "CUDA root: $cudaRoot"
+          $needed = @('cudart64_*.dll','cublas64_*.dll','cublasLt64_*.dll')
+          $found = Get-ChildItem -Path $cudaRoot -Recurse -File -Include $needed -ErrorAction SilentlyContinue
+          if (-not $found) {
+            Write-Host "::warning::no CUDA DLLs under $cudaRoot — searching all of the CUDA install dir"
+            $found = Get-ChildItem -Path "C:\Program Files\NVIDIA GPU Computing Toolkit" -Recurse -File -Include $needed -ErrorAction SilentlyContinue
+          }
+          Write-Host "CUDA DLLs found:"
+          $found | ForEach-Object { Write-Host "  $($_.FullName)"; Copy-Item $_.FullName -Destination $rel -Force }
+
+          # Fail loudly rather than publish an incomplete package.
+          foreach ($p in @('cudart64_*.dll','cublas64_*.dll','cublasLt64_*.dll')) {
+            if (-not (Get-ChildItem "$rel\$p" -ErrorAction SilentlyContinue)) {
+              Write-Host "::error::required CUDA DLL '$p' was not bundled — package would be incomplete"
+              exit 1
+            }
+          }
+
+          Write-Host "Release dir contents:"
+          Get-ChildItem $rel | ForEach-Object { Write-Host "  $($_.Name)" }
+
+          $out = "llama-win-cuda$($env:CUDA_VERSION)-sm120-x64.zip"
+          7z a -snl $out "$rel\*.exe" "$rel\*.dll"
           echo "ARTIFACT=$out" >> $env:GITHUB_ENV
 
       - name: Upload artifact
