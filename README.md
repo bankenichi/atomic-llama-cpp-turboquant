@@ -3,45 +3,43 @@
 ![atomic llama](https://github.com/AtomicBot-ai/.github/raw/main/assets/atomic%20llama.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
-[![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-
-[Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md)
 
 LLM inference in C/C++
 
-## Recent API changes
+> **Personal fork** of [AtomicBot-ai/atomic-llama-cpp-turboquant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) (itself a fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)), maintained for private experimentation — not seeking upstream merges. Attribution & lineage: [`NOTICE.md`](NOTICE.md).
 
-- [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
-- [Changelog for `llama-server` REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+----
 
-## Hot topics
+## What's different in this build
 
-- **Gemma 4 MTP speculative decoding: pair a `gemma4` target with the official `gemma4_assistant` head (loaded via `--mtp-head`) for ~+30-50 % short-prompt throughput. See [MTP.md](MTP.md) and the pre-built Q4 assistant GGUFs at the [AtomicChat/Gemma 4 Assistant GGUF collection](https://huggingface.co/collections/AtomicChat/gemma-4-assistant-gguf).**
-- **Qwen 3.6 NextN speculative decoding: point `--model-draft` at the same combined `*_MTP.gguf` and pass `--spec-type nextn` — the draft context reuses the target `llama_model` (no second mmap) and lands +24-36 % tps on Qwen 3.6 35B-A3B MoE, +5-7 % tps on Qwen 3.6 27B dense (MacBook Pro M4 Max, single-slot). See [NEXTN.md](NEXTN.md). Recommended pre-built combined `_MTP.gguf` quants live in the **[AtomicChat — Qwen 3.6 UDT](https://huggingface.co/collections/AtomicChat/qwen-36-udt-atomicchat-6a0481f5cc5a057c07759176)** collection ([27B](https://huggingface.co/AtomicChat/Qwen3.6-27B-UDT-MTP-GGUF) · [35B-A3B](https://huggingface.co/AtomicChat/Qwen3.6-35B-A3B-UDT-MTP-GGUF)) — built with the Unsloth public MTP-aware imatrix + fork masks that pin NextN/MTP tensors to `Q8_0` (preserves draft acceptance) and lift attention Q/K to `Q6_K` (pairs cleanly with TurboQuant3 KV); upstream sources also work: [`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) / [`unsloth/Qwen3.6-27B-MTP-GGUF`](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF).**
-- **TurboQuant KV cache & weights: WHT-rotated low-bit quantization with backend-native kernels (Metal `TurboFlash`, CUDA, Vulkan, HIP). Use `-ctk turbo3 -ctv turbo3` for ~4.3× KV compression, or quantize weights to `TQ4_1S`/`TQ3_1S`. See [Compression below](#turboquant-kv-cache--weight-compression).**
-- **Hugging Face cache migration: models downloaded with `-hf` are now stored in the standard Hugging Face cache directory, enabling sharing with other HF tools.**
-- **[guide : using the new WebUI of llama.cpp](https://github.com/ggml-org/llama.cpp/discussions/16938)**
-- [guide : running gpt-oss with llama.cpp](https://github.com/ggml-org/llama.cpp/discussions/15396)
-- [[FEEDBACK] Better packaging for llama.cpp to support downstream consumers 🤗](https://github.com/ggml-org/llama.cpp/discussions/15313)
-- Support for the `gpt-oss` model with native MXFP4 format has been added | [PR](https://github.com/ggml-org/llama.cpp/pull/15091) | [Collaboration with NVIDIA](https://blogs.nvidia.com/blog/rtx-ai-garage-openai-oss) | [Comment](https://github.com/ggml-org/llama.cpp/discussions/15095)
-- Multimodal support arrived in `llama-server`: [#12898](https://github.com/ggml-org/llama.cpp/pull/12898) | [documentation](./docs/multimodal.md)
-- **This fork:** `--mmproj` can be loaded **alongside** `mtp` / `nextn` / `eagle3` speculative decoding on a single slot (validated on Qwen 3.6-35B-A3B-UDT + NextN + turbo3 KV and Gemma 4-26B-A4B + MTP + turbo3 KV). Draft acceleration applies to **text-only turns**; image-bearing turns fall back to plain target decoding (image still recognised). Other spec types remain disabled with multimodal. Details: [docs/speculative.md](./docs/speculative.md) and [NEXTN.md](./NEXTN.md) §10.
-- VS Code extension for FIM completions: https://github.com/ggml-org/llama.vscode
-- Vim/Neovim plugin for FIM completions: https://github.com/ggml-org/llama.vim
-- Hugging Face Inference Endpoints now support GGUF out of the box! https://github.com/ggml-org/llama.cpp/discussions/9669
-- Hugging Face GGUF editor: [discussion](https://github.com/ggml-org/llama.cpp/discussions/9268) | [tool](https://huggingface.co/spaces/CISCai/gguf-editor)
+This fork exists to run **Gemma 4 MTP speculative decoding together with vision (`--mmproj`) and CPU-offloaded MoE experts (`--n-cpu-moe`) on a single `llama-server`** — a combination that crashed or silently did nothing in the parent fork. Target stack: **Windows + NVIDIA (Blackwell `sm_120`), 16 GB VRAM**, running a 26B-A4B MoE with vision.
+
+Build/run/tuning orientation is in [`AGENTS.md`](AGENTS.md); the full root-cause writeup and performance notes are in [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/development/mtp-cpumoe-vision-fixes.md).
+
+Fixes carried in this tree (detail in the doc above):
+
+| Where | Symptom in parent | Fix |
+|---|---|---|
+| `ggml/CMakeLists.txt` | `No CMAKE_ASM_COMPILER` on MSVC | enable `ASM_MASM` (not generic `ASM`) under MSVC |
+| `vendor/cpp-httplib/httplib.cpp` | build error vs OpenSSL 3.x | `const_cast` for the now-`const` `X509_get_*_name` return |
+| `tools/server/server-common.h`, `server-context.cpp` | MTP never drafted when `--mmproj` was loaded | gate speculation on **real media** (`has_media()`), not mmproj presence; prime passes empty tokens for mtmd-safe specs |
+| `src/llama-model.cpp` | silent crash on the first MTP draft | skip the decode epilogue (`build_pooling`/`build_sampling`/`build_dense_out`/`set_outputs`) for `LLM_GRAPH_TYPE_MTP` graphs — **the load-bearing fix** |
+| `src/llama-context.cpp` | (hardening) | build `sched_mtp` with `op_offload=false` so the MTP graph stays GPU-resident |
+
+**Result:** one server doing text + vision, MTP drafting on text turns (graceful fallback on image turns), and CPU-MoE offload to fit the 26B in 16 GB. Practical tuning — the ~15 GB VRAM ceiling, `--n-cpu-moe` as the dominant gen-speed lever, and why MTP is roughly break-even on a CPU-offloaded MoE — is documented in the same writeup.
+
+Inherited fork features (from the parent; each has its own section below): **Gemma 4 MTP**, **Qwen 3.6 NextN**, and **TurboQuant KV / weight compression**.
 
 ----
 
 ## Quick start
 
-Getting started with llama.cpp is straightforward. Here are several ways to install it on your machine:
+Two ways to get this fork:
 
-- Install `llama.cpp` using [brew, nix or winget](docs/install.md)
-- Run with Docker - see our [Docker documentation](docs/docker.md)
-- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
-- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+- **Download the pre-built Windows CUDA binary** (RTX 50-series / `sm_120`, includes vision support) from this fork's [latest release](https://github.com/bankenichi/atomic-llama-cpp-turboquant/releases/latest) — auto-built by CI on each push to `main`.
+- **Build from source** — see [the build guide](docs/build.md). For Windows + CUDA, use the VS 2022 (v143) toolset; toolchain notes are in [`AGENTS.md`](AGENTS.md).
+
+(Upstream's `brew` / `nix` / `winget` / Docker / release channels are not published for this fork.)
 
 Once installed, you'll need a model to work with. Head to the [Obtaining and quantizing models](#obtaining-and-quantizing-models) section to learn more.
 
@@ -950,17 +948,6 @@ To learn more about model quantization, [read this documentation](tools/quantize
     </details>
 
 
-## Contributing
-
-- Contributors can open PRs
-- Collaborators will be invited based on contributions
-- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
-- Any help with managing issues, PRs and projects is very appreciated!
-- See [good first issues](https://github.com/ggml-org/llama.cpp/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for tasks suitable for first contributions
-- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
-- Make sure to read this: [Inference at the edge](https://github.com/ggml-org/llama.cpp/discussions/205)
-- A bit of backstory for those who are interested: [Changelog podcast](https://changelog.com/podcast/532)
-
 ## Other documentation
 
 - [cli](tools/cli/README.md)
@@ -972,7 +959,6 @@ To learn more about model quantization, [read this documentation](tools/quantize
 
 - [How to build](docs/build.md)
 - [Running on Docker](docs/docker.md)
-- [Build on Android](docs/android.md)
 - [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
 - [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
 
@@ -987,35 +973,6 @@ If your issue is with model generation quality, then please at least scan the fo
 - GPT-3.5 / InstructGPT / ChatGPT:
     - [Aligning language models to follow instructions](https://openai.com/research/instruction-following)
     - [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)
-
-## XCFramework
-The XCFramework is a precompiled version of the library for iOS, visionOS, tvOS,
-and macOS. It can be used in Swift projects without the need to compile the
-library from source. For example:
-```swift
-// swift-tools-version: 5.10
-// The swift-tools-version declares the minimum version of Swift required to build this package.
-
-import PackageDescription
-
-let package = Package(
-    name: "MyLlamaPackage",
-    targets: [
-        .executableTarget(
-            name: "MyLlamaPackage",
-            dependencies: [
-                "LlamaFramework"
-            ]),
-        .binaryTarget(
-            name: "LlamaFramework",
-            url: "https://github.com/ggml-org/llama.cpp/releases/download/b5046/llama-b5046-xcframework.zip",
-            checksum: "c19be78b5f00d8d29a25da41042cb7afa094cbf6280a225abe614b03b20029ab"
-        )
-    ]
-)
-```
-The above example is using an intermediate build `b5046` of the library. This can be modified
-to use a different version by changing the URL and checksum.
 
 ## Completions
 Command-line completion is available for some environments.

@@ -731,10 +731,6 @@ cmake .. -G Ninja `
 ninja
 ```
 
-## Android
-
-To read documentation for how to build on Android, [click here](./android.md)
-
 ## WebGPU [In Progress]
 
 The WebGPU backend relies on [Dawn](https://dawn.googlesource.com/dawn). Follow the instructions [here](https://dawn.googlesource.com/dawn/+/refs/heads/main/docs/quickstart-cmake.md) to install Dawn locally so that llama.cpp can find it using CMake. The current implementation is up-to-date with Dawn commit `18eb229`.
@@ -751,10 +747,6 @@ cmake --build build --config Release
 WebGPU allows cross-platform access to the GPU from supported browsers. We utilize [Emscripten](https://emscripten.org/) to compile ggml's WebGPU backend to WebAssembly. Emscripten does not officially support WebGPU bindings yet, but Dawn currently maintains its own WebGPU bindings called emdawnwebgpu.
 
 Follow the instructions [here](https://dawn.googlesource.com/dawn/+/refs/heads/main/src/emdawnwebgpu/) to download or build the emdawnwebgpu package (Note that it might be safer to build the emdawnwebgpu package locally, so that it stays in sync with the version of Dawn you have installed above). When building using CMake, the path to the emdawnwebgpu port file needs to be set with the flag `EMDAWNWEBGPU_DIR`.
-
-## IBM Z & LinuxONE
-
-To read documentation for how to build on IBM Z & LinuxONE, [click here](./build-s390x.md)
 
 ## OpenVINO
 
