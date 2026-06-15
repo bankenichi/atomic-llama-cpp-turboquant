@@ -435,6 +435,48 @@ void server_tokens::keep_first(size_t n) {
     tokens.resize(n);
 }
 
+size_t server_tokens::snap_past_media(size_t pos) const {
+    if (!has_mtmd) {
+        return pos;
+    }
+    for (const auto & it : map_idx_to_media) {
+        const size_t start = it.first;
+        const size_t n_tok = mtmd_input_chunk_get_n_tokens(it.second.get());
+        // strictly inside: a cut here would split the image. start and start+n_tok
+        // are both clean boundaries and need no adjustment.
+        if (pos > start && pos < start + n_tok) {
+            return start + n_tok;
+        }
+    }
+    return pos;
+}
+
+void server_tokens::erase_range(size_t pos, size_t count) {
+    if (count == 0) {
+        return;
+    }
+    GGML_ASSERT(pos + count <= tokens.size());
+
+    if (has_mtmd) {
+        // The window must be chunk-aligned (caller used snap_past_media). Rebuild the
+        // media map: keep chunks before the window, drop chunks fully inside it, and
+        // shift chunks after it down by `count`.
+        std::map<size_t, mtmd::input_chunk_ptr> new_map;
+        for (auto & kv : map_idx_to_media) {
+            const size_t k = kv.first;
+            if (k < pos) {
+                new_map.emplace(k, std::move(kv.second));
+            } else if (k >= pos + count) {
+                new_map.emplace(k - count, std::move(kv.second));
+            }
+            // else: chunk fully inside the erased window -> dropped
+        }
+        map_idx_to_media = std::move(new_map);
+    }
+
+    tokens.erase(tokens.begin() + pos, tokens.begin() + pos + count);
+}
+
 std::string server_tokens::detokenize(const llama_context * ctx, bool special) const {
     llama_tokens text_tokens;
     text_tokens.reserve(tokens.size());

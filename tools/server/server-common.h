@@ -214,6 +214,16 @@ public:
 
     void keep_first(size_t n);
 
+    // If `pos` falls strictly inside a media chunk, return the index just past that
+    // chunk (so a cut at the returned index never splits an image); otherwise return
+    // `pos` unchanged. Used to snap context-shift boundaries to chunk edges.
+    size_t snap_past_media(size_t pos) const;
+
+    // Remove `count` tokens starting at `pos`, shifting later tokens (and media-chunk
+    // indices) down by `count`. The window [pos, pos+count) MUST be chunk-aligned
+    // (caller snaps with snap_past_media); fully-contained media chunks are dropped.
+    void erase_range(size_t pos, size_t count);
+
     std::string detokenize(const llama_context * ctx, bool special) const;
 
     size_t get_common_prefix(const server_tokens & b) const;

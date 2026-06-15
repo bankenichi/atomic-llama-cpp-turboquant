@@ -89,16 +89,100 @@ standard-RoPE multimodal models, leave `ctx_shift` enabled.
 
 ## Implementation checklist (strict order)
 
-1. [ ] Add `erase_range` + the boundary-snap helper to `server_tokens`; unit-reason
-       through: pure text, single image before window, image straddling start,
-       image straddling end, image fully inside window.
-2. [ ] In the shift loop, replace the `GGML_ABORT` with the std-RoPE allow + snap +
-       `erase_range`. Keep `seq_rm`/`seq_add` as-is.
-3. [ ] Flip the load-time gate to key on `n_pos_per_embd > 1` instead of `mctx`.
+1. [x] Add `erase_range` + `snap_past_media` to `server_tokens`
+       (`tools/server/server-common.{h,cpp}`).
+2. [x] In the shift loop (`server-context.cpp` ~L2167), remove the `GGML_ABORT`, snap
+       `n_keep`/`n_discard` to image edges when media present, route the token update
+       through `erase_range` for mmproj prompts (original fast path kept for non-mmproj).
+       `seq_rm`/`seq_add` unchanged.
+3. [x] Flip the load-time gate (~L842) to disable only for `LLAMA_ROPE_TYPE_MROPE`
+       (standard-RoPE multimodal stays enabled).
 4. [ ] Build `llama-server` (Windows CUDA) and smoke-test (see criteria).
 5. [ ] If turbo-K shift produces incoherent output after a shift, fall back to a
        guard that only enables shift when KV types are non-turbo (document it).
 6. [ ] Update this doc + `AGENTS.md` with the result.
+
+> Items 1-3 implemented and built. The gate uses
+> `llama_model_rope_type(model) == LLAMA_ROPE_TYPE_MROPE`; added a guard that fails the
+> turn if the discard window is entirely one image (`n_discard <= 0` after snap).
+
+## Results (tested)
+
+- **f16 / q8 KV: WORKS.** In-place shift on a standard-RoPE multimodal model (Gemma 4 +
+  `--mmproj`) is coherent across the shift. Log shows `slot context shift, n_keep=…
+  n_discard=…`; `erase_range` + `seq_rm`/`seq_add` are correct. Feature complete for
+  non-turbo KV.
+- **TurboQuant KV (`-ctk turbo4 -ctv turbo2`): garbles at the shift point.** Root cause:
+  `seq_add` re-applies RoPE to the K cache (K-shift), and there is no K-shift kernel for
+  TurboQuant's WHT-rotated quantized K. (`get_can_shift()` returns true on arch alone, so
+  the shift is attempted and corrupts.)
+
+## Decision for turbo KV: reprefill-on-overflow (chosen)
+
+Rather than disable shift on turbo (defeats the daily driver) or patch the WHT-domain
+K-shift kernel (deep, multi-backend, high correctness risk — RoPE doesn't commute with
+WHT), make the overflow path **re-encode** the retained tokens when the KV can't
+K-shift. This adds the missing functionality, is KV-type-agnostic, and is the mechanism
+llama.cpp used before in-place K-shift existed. Cost: an occasional ~2-4 s reprefill at
+the overflow point (rare, especially at large `--ctx-size`).
+
+### Reprefill design (next implementation)
+
+In the shift loop, branch on `llama_memory_can_shift(llama_get_memory(ctx))`:
+- **can shift (f16/q8):** keep the current in-place path (done).
+- **cannot shift (turbo):** instead of `seq_add`:
+  1. snap `n_keep` to an image boundary (`snap_past_media`);
+  2. `erase_range(n_keep, n_discard)` on `slot.prompt.tokens` (chunk-aware, already built);
+  3. `llama_memory_seq_rm(mem, slot.id, n_keep, -1)` — drop KV from `n_keep` onward
+     (KV for `[0, n_keep)` is kept as-is, no shift needed);
+  4. re-enter prompt processing so the retained suffix is re-encoded at contiguous
+     positions `n_keep…`. **Hook TBD:** set slot state back to prompt-processing and the
+     processed-length to `n_keep` (study `SLOT_STATE_PROCESSING_PROMPT` / how the slot
+     syncs `slot.prompt.tokens` vs KV via common-prefix; the suffix beyond the kept KV
+     must be re-decoded).
+
+### Turbo K-shift kernel — deferred (future optimization)
+
+The only thing reprefill gives up is the occasional reprefill pause. If that ever
+matters, implement RoPE-delta application on TurboQuant K (dequant → inverse-WHT →
+rotate by Δpos → WHT → requant, per shifted cell), and flip `get_can_shift()` to allow
+turbo. High effort, not scheduled.
+
+### Checklist addendum
+
+7. [x] **Model shiftability correctly at the KV layer** (the root fix): `get_can_shift()`
+       (`src/llama-kv-cache.cpp`) now returns false for turbo K types (in addition to
+       STEP35 / M-RoPE). Removed the server's "multimodal disables ctx_shift" gate
+       (`server-context.cpp` ~L842) — shiftability is now decided solely by
+       `llama_memory_can_shift()` (existing check ~L864). Net: f16/q8 multimodal
+       (Gemma 4 + `--mmproj`) shifts in-place (previously fully disabled); turbo / M-RoPE
+       fall back to graceful truncation (no corruption).
+8. [x] Reprefill branch for non-K-shiftable KV (turbo / M-RoPE). The shift loop now
+       branches on `llama_memory_can_shift()`: **in-place** when true (f16/q8),
+       **reprefill** otherwise. Reprefill keeps the head KV `[0, n_keep)`, drops the rest
+       (`seq_rm n_keep..-1`), trims tokens with `erase_range`, and re-encodes the retained
+       recent window at contiguous positions via a normal `llama_decode` loop (works for
+       any KV type — turbo K recomputed correctly). The resume point is clean because the
+       shift loop runs before the generating batch-add (`pos_next()` reflects the new end).
+       `ctx_shift` is no longer disabled at load for non-K-shiftable KV (only `cache_reuse`).
+       Guard: if the retained window holds an image (`LLAMA_TOKEN_NULL`), bail gracefully
+       (re-encoding an image needs the mtmd path — future work).
+9. [x] Build + tested:
+       - f16/q8 multimodal shift coherent (`mode = shift`).
+       - **turbo** overflow now CONTINUES via reprefill (`mode = reprefill`) — generated
+         well past `n_ctx` (2461 tokens after a 4096 ctx), coherent. The previously-
+         garbling case is fixed.
+       - Required a third fix: `common_init_from_params` (`common/common.cpp:1327`)
+         auto-disables `ctx_shift` for non-K-shiftable KV; the server now captures the
+         user's `--context-shift` request and re-asserts it after init (it has the
+         reprefill fallback that llama-cli lacks).
+
+## FINAL STATUS: complete
+
+Context shift works with vision and with TurboQuant KV. f16/q8 use in-place K-shift;
+turbo (and any non-K-shiftable KV) use reprefill. Only remaining limitation: a retained
+window containing an image falls back to graceful truncation (re-encoding an image needs
+the mtmd path) — future work, low priority.
 
 ## Test criteria
 

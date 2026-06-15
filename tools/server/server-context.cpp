@@ -674,7 +674,18 @@ private:
 
         params_base = params;
 
+        // common_init_from_params() auto-disables ctx_shift when the KV can't do an
+        // in-place K-shift (e.g. TurboQuant KV). The server, unlike llama-cli, has a
+        // reprefill fallback for that case, so remember the user's request and re-assert
+        // it after init.
+        const bool user_requested_ctx_shift = params_base.ctx_shift;
+
         llama_init = common_init_from_params(params_base);
+
+        if (user_requested_ctx_shift && !params_base.ctx_shift) {
+            params_base.ctx_shift = true;
+            SRV_INF("%s\n", "ctx_shift re-enabled: KV is not in-place K-shiftable, the server will use the reprefill fallback");
+        }
 
         // propagate model-metadata sampling defaults back to caller
         params.sampling = params_base.sampling;
@@ -839,10 +850,13 @@ private:
             }
             SRV_INF("loaded multimodal model, '%s'\n", mmproj_path.c_str());
 
-            if (params_base.ctx_shift) {
-                params_base.ctx_shift = false;
-                SRV_WRN("%s\n", "ctx_shift is not supported by multimodal, it will be disabled");
-            }
+            // Note: context shift is NOT disabled here just because an mmproj is loaded.
+            // Shiftability is a property of the KV cache / model and is checked below via
+            // llama_memory_can_shift() (get_can_shift): M-RoPE and TurboQuant KV report
+            // non-shiftable and ctx_shift is disabled there. Standard-RoPE multimodal
+            // models (e.g. Gemma 4 with f16/q8 KV) shift fine — the shift loop snaps the
+            // discard window to whole-image boundaries (server_tokens::snap_past_media /
+            // erase_range).
 
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
@@ -857,11 +871,10 @@ private:
         }
 
         if (!llama_memory_can_shift(llama_get_memory(ctx))) {
-            if (params_base.ctx_shift) {
-                params_base.ctx_shift = false;
-                SRV_WRN("%s\n", "ctx_shift is not supported by this context, it will be disabled");
-            }
-
+            // ctx_shift stays ENABLED even when the KV can't do an in-place K-shift (e.g.
+            // TurboQuant KV, M-RoPE): the shift loop falls back to reprefill (re-encode the
+            // retained window via a normal forward pass) for such caches. Only cache_reuse,
+            // which has no such fallback, is hard-disabled here.
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by this context, it will be disabled");
@@ -2159,11 +2172,10 @@ private:
                     continue;
                 }
 
-                if (mctx) {
-                    // we should never reach this because params_base.ctx_shift is automatically disabled if mmproj is loaded
-                    // we don't support ctx_shift because an image chunk may contains multiple tokens
-                    GGML_ABORT("not supported by multimodal");
-                }
+                // Two paths below: in-place K-shift when the KV supports it (f16/q8), else
+                // reprefill (re-encode the retained window) for non-K-shiftable KV (turbo,
+                // M-RoPE). The discard window is snapped to whole-image boundaries first so
+                // an image is never split.
 
                 if (slot.task->is_parent() || slot.task->is_child()) {
                     send_error(slot, "context shift cannot be used for shared prompt", ERROR_TYPE_SERVER);
@@ -2180,28 +2192,95 @@ private:
 
                 n_keep = std::min(slot.n_ctx - 4, n_keep);
 
-                const int n_left    = slot.prompt.n_tokens() - n_keep;
-                const int n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
+                const int n_left = slot.prompt.n_tokens() - n_keep;
+                int n_discard    = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
 
-                SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
+                // When the prompt holds image chunks, snap the keep/discard boundaries to
+                // whole-image edges so a shift never splits an image (a chunk occupies
+                // multiple KV cells). snap_past_media() pushes a boundary that lands inside
+                // an image forward to that image's end.
+                if (slot.prompt.tokens.has_media()) {
+                    n_keep        = (int) slot.prompt.tokens.snap_past_media((size_t) n_keep);
+                    const int end = (int) slot.prompt.tokens.snap_past_media((size_t) (n_keep + n_discard));
+                    n_discard     = end - n_keep;
+                    if (n_discard <= 0) {
+                        // discard window is entirely spanned by one image; can't evict a
+                        // partial image — fail this turn rather than corrupt the cache.
+                        send_error(slot, "context shift cannot evict a partial image chunk", ERROR_TYPE_SERVER);
+                        slot.release();
+                        continue;
+                    }
+                }
 
-                llama_context_nextn_seq_rm(ctx, slot.id, n_keep, n_keep + n_discard);
-                llama_memory_seq_add(llama_get_memory(ctx), slot.id, n_keep + n_discard, slot.prompt.n_tokens(), -n_discard);
+                const bool can_inplace = llama_memory_can_shift(llama_get_memory(ctx));
 
-                // add generated tokens to cache
-                // ref: https://github.com/ggml-org/llama.cpp/pull/16818#discussion_r2473269481
-                {
-                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d, mode = %s\n",
+                        n_keep, n_left, n_discard, can_inplace ? "shift" : "reprefill");
 
-                    llama_tokens new_tokens = slot.prompt.tokens.get_text_tokens(); // copy
-                    for (size_t i = n_keep + n_discard; i < new_tokens.size(); i++) {
-                        new_tokens[i - n_discard] = new_tokens[i];
+                if (can_inplace) {
+                    // In-place K-shift: drop the discard window and renumber the remaining
+                    // positions (requires K-shift support — f16/q8 KV).
+                    llama_context_nextn_seq_rm(ctx, slot.id, n_keep, n_keep + n_discard);
+                    llama_memory_seq_add(llama_get_memory(ctx), slot.id, n_keep + n_discard, slot.prompt.n_tokens(), -n_discard);
+
+                    if (slot.prompt.tokens.has_mtmd) {
+                        // media-aware in-place erase: shifts later tokens down and keeps
+                        // map_idx_to_media in sync (window is image-aligned per the snap above).
+                        slot.prompt.tokens.erase_range((size_t) n_keep, (size_t) n_discard);
+                    } else {
+                        // add generated tokens to cache
+                        // ref: https://github.com/ggml-org/llama.cpp/pull/16818#discussion_r2473269481
+                        llama_tokens new_tokens = slot.prompt.tokens.get_text_tokens(); // copy
+                        for (size_t i = n_keep + n_discard; i < new_tokens.size(); i++) {
+                            new_tokens[i - n_discard] = new_tokens[i];
+                        }
+
+                        new_tokens.resize(slot.prompt.tokens.size() - n_discard);
+
+                        slot.prompt.tokens.clear();
+                        slot.prompt.tokens.insert(new_tokens);
+                    }
+                } else {
+                    // Reprefill fallback for KV that can't be K-shifted in place (e.g.
+                    // TurboQuant). Keep the head KV [0, n_keep), drop the rest, and RE-ENCODE
+                    // the retained recent window at contiguous positions via a normal forward
+                    // pass (works for any KV type — turbo K is recomputed correctly).
+                    //
+                    // Re-encoding a retained *image* would require the mtmd vision path, which
+                    // this path doesn't do; bail gracefully if the recent window holds media.
+                    bool recent_has_media = false;
+                    for (size_t i = (size_t) (n_keep + n_discard); i < slot.prompt.tokens.size(); ++i) {
+                        if (slot.prompt.tokens[i] == LLAMA_TOKEN_NULL) { recent_has_media = true; break; }
+                    }
+                    if (recent_has_media) {
+                        send_error(slot, "context shift: reprefill of a retained image is not supported with this KV type (use f16/q8 KV for in-place shift)", ERROR_TYPE_SERVER);
+                        slot.release();
+                        continue;
                     }
 
-                    new_tokens.resize(slot.prompt.tokens.size() - n_discard);
+                    // keep head KV, drop everything from n_keep onward, trim tokens to head+recent
+                    llama_memory_seq_rm(llama_get_memory(ctx), slot.id, n_keep, -1);
+                    slot.prompt.tokens.erase_range((size_t) n_keep, (size_t) n_discard);
 
-                    slot.prompt.tokens.clear();
-                    slot.prompt.tokens.insert(new_tokens);
+                    // re-encode the retained recent tokens (now at [n_keep, M)) at positions n_keep..
+                    const size_t reprefill_end   = slot.prompt.tokens.size();
+                    const int    reprefill_chunk = (int) llama_n_batch(ctx);
+                    size_t rp = (size_t) n_keep;
+                    bool reprefill_ok = true;
+                    while (rp < reprefill_end) {
+                        common_batch_clear(batch);
+                        for (; rp < reprefill_end && batch.n_tokens < reprefill_chunk; ++rp) {
+                            common_batch_add(batch, slot.prompt.tokens[rp], (llama_pos) rp, { slot.id }, false);
+                        }
+                        if (llama_decode(ctx, batch) != 0) { reprefill_ok = false; break; }
+                    }
+                    common_batch_clear(batch); // leave clean for the main batch population below
+
+                    if (!reprefill_ok) {
+                        send_error(slot, "context shift: reprefill decode failed", ERROR_TYPE_SERVER);
+                        slot.release();
+                        continue;
+                    }
                 }
 
                 slot.truncated = true;

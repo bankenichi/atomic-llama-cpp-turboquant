@@ -1301,6 +1301,16 @@ bool llama_kv_cache::get_can_shift() const {
     if (hparams.n_pos_per_embd() > 1) {
         return false;
     }
+    // TurboQuant K cells are WHT-rotated + quantized; there is no K-shift kernel to
+    // re-apply RoPE to them, so a position shift (context shift) would corrupt the
+    // cache. Report non-shiftable when K is a turbo type — callers fall back to
+    // graceful truncation. (Non-turbo KV shifts fine, including multimodal / Gemma 4.)
+    if (!layers.empty() && layers[0].k) {
+        const ggml_type kt = layers[0].k->type;
+        if (kt == GGML_TYPE_TURBO2_0 || kt == GGML_TYPE_TURBO3_0 || kt == GGML_TYPE_TURBO4_0) {
+            return false;
+        }
+    }
     return true;
 }
 
