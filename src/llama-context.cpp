@@ -1258,9 +1258,13 @@ bool llama_context::ensure_sched_mtp() {
     const size_t   max_nodes = this->graph_max_nodes(n_tokens);
 
     gf_res_prev_mtp.reset(new llm_graph_result(max_nodes));
+    // op_offload forced OFF for sched_mtp: the MTP graph is GPU-resident (assistant on
+    // GPU, target KV on GPU). Under --n-cpu-moe the target sched has op_offload on;
+    // inheriting it here lets the scheduler push MTP ops onto the CPU backend. The CPU
+    // backend stays in the list as the required fallback (sched_new asserts CPU is last).
     sched_mtp.reset(ggml_backend_sched_new(
             backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(),
-            max_nodes, /*pipeline_parallel*/ false, cparams.op_offload));
+            max_nodes, /*pipeline_parallel*/ false, /*op_offload*/ false));
     if (!sched_mtp) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_new failed for sched_mtp\n", __func__);
         gf_res_prev_mtp.reset();

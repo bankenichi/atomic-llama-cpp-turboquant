@@ -9573,19 +9573,27 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             GGML_ABORT("fatal error");
     }
 
-    // add on pooling layer
-    llm->build_pooling(cls, cls_b, cls_out, cls_out_b, cls_norm);
+    // The Gemma 4 MTP graph is self-contained: llm_build_gemma4_mtp publishes its own
+    // outputs (t_logits / t_embd / t_argmax) and expands them in its constructor. The
+    // generic decode epilogue below (pooling, backend sampling, dense projections, and
+    // the standard output mapping in set_outputs) is for normal decode/embedding graphs
+    // and faults on the single-token MTP graph (build_pooling derefs an output that the
+    // MTP ubatch does not mark). Skip the epilogue entirely for MTP graphs.
+    if (params.gtype != LLM_GRAPH_TYPE_MTP) {
+        // add on pooling layer
+        llm->build_pooling(cls, cls_b, cls_out, cls_out_b, cls_norm);
 
-    // add backend sampling layers (if any)
-    llm->build_sampling();
+        // add backend sampling layers (if any)
+        llm->build_sampling();
 
-    // if the gguf model was converted with --sentence-transformers-dense-modules
-    // there will be two additional dense projection layers
-    // dense linear projections are applied after pooling
-    // TODO: move reranking logic here and generalize
-    llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
+        // if the gguf model was converted with --sentence-transformers-dense-modules
+        // there will be two additional dense projection layers
+        // dense linear projections are applied after pooling
+        // TODO: move reranking logic here and generalize
+        llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
 
-    llm->res->set_outputs();
+        llm->res->set_outputs();
+    }
 
     return llm->res->get_gf();
 }

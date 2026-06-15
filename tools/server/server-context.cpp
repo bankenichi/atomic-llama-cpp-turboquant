@@ -2242,9 +2242,11 @@ private:
             }
 
             // NextN/MTP prime requires per-token target hidden states which the mtmd image-decode
-            // path does not produce. Until that is wired in, skip drafting for slots whose prompt
-            // contains image chunks - the slot still works as a normal (non-speculative) decode.
-            const bool skip_draft_mtmd = mctx && slot.prompt.tokens.has_mtmd;
+            // path does not produce. Until that is wired in, skip drafting only for prompts that
+            // actually contain image chunks - the slot still works as a normal (non-speculative)
+            // decode for those. Text-only turns draft normally even when an mmproj is loaded
+            // (gate on has_media(), not has_mtmd which is true whenever an mmproj is present).
+            const bool skip_draft_mtmd = mctx && slot.prompt.tokens.has_media();
             const int  n_draft_max     = skip_draft_mtmd ? 0 : n_draft_max_raw;
 
             if (n_draft_max > 0) {
@@ -3046,14 +3048,24 @@ private:
                     slot.state = SLOT_STATE_GENERATING;
 
                     if (slot.can_speculate()) {
-                        if (slot.prompt.tokens.has_mtmd) {
-                            // Skip spec begin/prime for mtmd prompts: the per-token target hidden
-                            // states for image positions are not currently produced, which makes
-                            // NextN prime partial and could desync RoPE positions on later drafts.
-                            // The slot will still generate correctly via the non-speculative path.
+                        if (slot.prompt.tokens.has_media()) {
+                            // Skip spec begin/prime only for prompts that actually contain media:
+                            // the per-token target hidden states for image positions are not
+                            // currently produced, which makes NextN prime partial and could desync
+                            // RoPE positions on later drafts. Text-only prompts prime normally even
+                            // when an mmproj is loaded. The slot still generates correctly via the
+                            // non-speculative path for media prompts.
                             SLT_INF(slot, "%s", "skipping speculative prime for multimodal prompt\n");
                         } else {
-                            common_speculative_begin(slot.spec, slot.prompt.tokens.get_text_tokens());
+                            // get_text_tokens() asserts !has_mtmd, but with an mmproj loaded a
+                            // text-only prompt still has has_mtmd=true. mtmd-safe spec impls (MTP/
+                            // NextN) ignore the prime prompt anyway (begin() does GGML_UNUSED), so
+                            // pass an empty token list in that case to avoid the assert. Non-mtmd
+                            // runs keep the real text tokens for ngram/draft impls that use them.
+                            static const llama_tokens k_empty_prime;
+                            const bool mtmd_safe_prime = mctx && common_speculative_all_impls_mtmd_safe(slot.spec);
+                            common_speculative_begin(slot.spec,
+                                    mtmd_safe_prime ? k_empty_prime : slot.prompt.tokens.get_text_tokens());
                         }
                     }
                 } else if (slot.state != SLOT_STATE_GENERATING) {

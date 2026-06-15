@@ -200,6 +200,13 @@ public:
 
     bool empty() const { return tokens.empty(); }
 
+    // true only if this prompt actually contains image/media chunks.
+    // distinct from has_mtmd, which is true whenever an mmproj is loaded
+    // (i.e. the container is multimodal-capable) even for pure-text prompts.
+    // speculative decoding (MTP/NextN) must be skipped only when real media
+    // is present, because image positions lack per-token target hidden states.
+    bool has_media() const { return !map_idx_to_media.empty(); }
+
     void clear() {
         map_idx_to_media.clear();
         tokens.clear();

@@ -12571,7 +12571,7 @@ STACK_OF(X509_NAME) *
   X509 *cert = nullptr;
   while ((cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) !=
          nullptr) {
-    X509_NAME *name = X509_get_subject_name(cert);
+    X509_NAME *name = const_cast<X509_NAME *>(X509_get_subject_name(cert));
     if (name) { sk_X509_NAME_push(ca_list, X509_NAME_dup(name)); }
     X509_free(cert);
   }
@@ -16507,3 +16507,4 @@ WebSocketClient::enable_server_certificate_verification(bool enabled) {
 } // namespace ws
 
 } // namespace httplib
+
