@@ -148,3 +148,6 @@ a.out.*
 
 .history/
 .scratch/
+
+# personal launcher (machine-specific absolute paths)
+run-gemma.ps1

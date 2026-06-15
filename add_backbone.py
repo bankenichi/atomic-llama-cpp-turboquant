@@ -19,6 +19,8 @@ import gguf  # noqa: E402
 # Reuse the tested copy_with_new_metadata / MetadataDetails from the repo script
 gnm_path = repo / "gguf-py" / "gguf" / "scripts" / "gguf_new_metadata.py"
 spec = importlib.util.spec_from_file_location("gnm", gnm_path)
+if spec is None or spec.loader is None:
+    sys.exit(f"! could not load module spec from {gnm_path}")
 gnm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gnm)
 
