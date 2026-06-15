@@ -24,18 +24,28 @@ Authoritative writeup: [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/deve
 4. `src/llama-context.cpp` — `sched_mtp` created with `op_offload = false`.
 5. Build fixes in-tree: `ggml/CMakeLists.txt` (`ASM_MASM` under MSVC) and
    `vendor/cpp-httplib/httplib.cpp` (`const_cast` for OpenSSL 3.x `X509_get_*_name`).
+6. **Context shift with vision + all KV types** (`server-common.{h,cpp}`,
+   `server-context.cpp`, `src/llama-kv-cache.cpp`): in-place K-shift for f16/q8 with
+   chunk-aware `erase_range` + image-boundary `snap_past_media`; reprefill fallback for
+   turbo / M-RoPE that re-encodes the retained window. `get_can_shift()` reports turbo K as
+   non-shiftable; the server re-asserts `ctx_shift` over the common-layer auto-disable.
+   See [`docs/development/context-shift-with-vision.md`](docs/development/context-shift-with-vision.md).
 
 Net effect: Gemma 4 MTP speculative decoding runs with `--n-cpu-moe` **and** `--mmproj`
-(vision) on a single server, drafting on text turns and falling back cleanly on image turns.
+(vision) on a single server, drafting on text turns and falling back cleanly on image turns;
+context shift works with vision on every KV type.
 
 ## Building (Windows + CUDA)
 
 - **Toolchain gotcha:** CUDA's `nvcc` can crash against bleeding-edge MSVC (VS 2026). Use the
   **VS 2022 (v143) toolset** for CUDA builds. CI uses `windows-2022` + CUDA 13.1, target `sm_120`.
 - Local: `cmake -B build -DGGML_CUDA=ON` then `cmake --build build --config Release --target llama-server`.
-- CI: `.github/workflows/windows-cuda.yml` builds `llama-server` (CUDA, `sm_120`, vision) and
-  publishes to the rolling **`latest`** GitHub Release on each push to `main` / manual dispatch.
-  It is the **only** workflow — other platforms build manually.
+- CI: `.github/workflows/windows-cuda.yml` builds the **full tool suite** (CUDA, `sm_120`,
+  vision; static BoringSSL so no external OpenSSL DLLs), bundles the CUDA runtime DLLs
+  (`cudart`/`cublas`/`cublasLt`) so the zip is self-contained (only the NVIDIA driver + VC++
+  Redist needed), and publishes to the rolling **`latest`** GitHub Release on each push to
+  `main` / manual dispatch. It fails the build if the CUDA DLLs aren't bundled. It is the
+  **only** workflow — other platforms build manually.
 
 ## Running & performance (hard-won; details in the fixes doc)
 

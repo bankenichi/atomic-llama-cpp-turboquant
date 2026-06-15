@@ -25,6 +25,7 @@ Fixes carried in this tree (detail in the doc above):
 | `tools/server/server-common.h`, `server-context.cpp` | MTP never drafted when `--mmproj` was loaded | gate speculation on **real media** (`has_media()`), not mmproj presence; prime passes empty tokens for mtmd-safe specs |
 | `src/llama-model.cpp` | silent crash on the first MTP draft | skip the decode epilogue (`build_pooling`/`build_sampling`/`build_dense_out`/`set_outputs`) for `LLM_GRAPH_TYPE_MTP` graphs — **the load-bearing fix** |
 | `src/llama-context.cpp` | (hardening) | build `sched_mtp` with `op_offload=false` so the MTP graph stays GPU-resident |
+| `server-*.{cpp,h}`, `src/llama-kv-cache.cpp` | context shift was disabled for **all** multimodal | context shift now works with vision: in-place K-shift for f16/q8 (chunk-aware, image-boundary-snapped) + **reprefill** fallback for turbo/M-RoPE KV ([details](docs/development/context-shift-with-vision.md)) |
 
 **Result:** one server doing text + vision, MTP drafting on text turns (graceful fallback on image turns), and CPU-MoE offload to fit the 26B in 16 GB. Practical tuning — the ~15 GB VRAM ceiling, `--n-cpu-moe` as the dominant gen-speed lever, and why MTP is roughly break-even on a CPU-offloaded MoE — is documented in the same writeup.
 
@@ -566,25 +567,10 @@ Instructions for adding support for new models: [HOWTO-add-model.md](docs/develo
 
 ## Supported backends
 
-| Backend | Target devices |
-| --- | --- |
-| [Metal](docs/build.md#metal-build) | Apple Silicon |
-| [BLAS](docs/build.md#blas-build) | All |
-| [BLIS](docs/backend/BLIS.md) | All |
-| [SYCL](docs/backend/SYCL.md) | Intel and Nvidia GPU |
-| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
-| [MUSA](docs/build.md#musa) | Moore Threads GPU |
-| [CUDA](docs/build.md#cuda) | Nvidia GPU |
-| [HIP](docs/build.md#hip) | AMD GPU |
-| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
-| [Vulkan](docs/build.md#vulkan) | GPU |
-| [CANN](docs/build.md#cann) | Ascend NPU |
-| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
-| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
-| [WebGPU [In Progress]](docs/build.md#webgpu) | All |
-| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
-| [Hexagon [In Progress]](docs/backend/snapdragon/README.md) | Snapdragon |
-| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
+This fork is built and maintained for **CUDA on Windows** (Blackwell `sm_120`, RTX 50-series).
+See [`AGENTS.md`](AGENTS.md) and [`docs/build.md`](docs/build.md) for the build path. The
+underlying llama.cpp engine still supports the full upstream backend set (Metal, Vulkan, HIP,
+SYCL, etc.) if you build for those targets yourself — they are simply not maintained here.
 
 ## Obtaining and quantizing models
 
@@ -958,7 +944,6 @@ To learn more about model quantization, [read this documentation](tools/quantize
 #### Development documentation
 
 - [How to build](docs/build.md)
-- [Running on Docker](docs/docker.md)
 - [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
 - [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
 
