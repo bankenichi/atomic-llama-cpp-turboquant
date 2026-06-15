@@ -55,6 +55,7 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=120 ^
             -DGGML_CUDA_CUB_3DOT2=ON ^
             -DLLAMA_CURL=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=OFF
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
