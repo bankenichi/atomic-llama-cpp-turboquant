@@ -1,0 +1,98 @@
+name: Windows CUDA build
+
+# Builds llama-server (with CUDA + vision/mtmd) for Blackwell (sm_120, e.g. RTX 5080)
+# and uploads it as a downloadable artifact. Personal fork — Windows/CUDA only.
+# Runs on pushes to main (ignoring docs/launcher) and on manual dispatch.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+      - '*.ps1'
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: 'CUDA toolkit version'
+        default: '13.1'
+        required: false
+
+env:
+  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '13.1' }}
+
+jobs:
+  windows-cuda:
+    runs-on: windows-2022
+    permissions:
+      contents: write   # needed to create/update the GitHub Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-cuda-server
+          variant: ccache
+          evict-old-files: 7d
+
+      - name: Install CUDA Toolkit
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: ${{ env.CUDA_VERSION }}
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Build llama-server (CUDA, sm_120)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=120 ^
+            -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=OFF
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% --target llama-server
+
+      - name: Package
+        shell: pwsh
+        run: |
+          # bundle the CUDA runtime DLLs so the artifact runs with only the NVIDIA driver
+          # (the build targets CUDA 13.1; the local machine may have a different toolkit)
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${env:CUDA_VERSION}\bin"
+          Copy-Item "$cudaBin\cudart64_*.dll","$cudaBin\cublas64_*.dll","$cudaBin\cublasLt64_*.dll" .\build\bin\Release\ -ErrorAction SilentlyContinue
+          $out = "llama-server-win-cuda${env:CUDA_VERSION}-sm120-x64.zip"
+          7z a -snl $out .\build\bin\Release\*.exe .\build\bin\Release\*.dll
+          echo "ARTIFACT=$out" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-server-win-cuda-sm120
+          path: ${{ env.ARTIFACT }}
+          retention-days: 14
+
+      - name: Publish to "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Windows CUDA build (sm_120)
+          prerelease: true
+          # replace the asset of the same name on each build so "latest" always
+          # holds the newest binary
+          files: ${{ env.ARTIFACT }}
+          body: |
+            Automated **llama-server** Windows x64 build — CUDA, Blackwell `sm_120` (RTX 50-series).
+            Includes vision (`--mmproj`) support and the bundled CUDA runtime DLLs (runs with just the NVIDIA driver).
+
+            - Commit: `${{ github.sha }}`
+            - CUDA toolkit: `${{ env.CUDA_VERSION }}`
+            - Built on `windows-2022` (MSVC 2022)
+
+            Unzip and run `llama-server.exe` (or point `run-gemma.ps1` at it).
