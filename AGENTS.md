@@ -30,6 +30,15 @@ Authoritative writeup: [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/deve
    turbo / M-RoPE that re-encodes the retained window. `get_can_shift()` reports turbo K as
    non-shiftable; the server re-asserts `ctx_shift` over the common-layer auto-disable.
    See [`docs/development/context-shift-with-vision.md`](docs/development/context-shift-with-vision.md).
+7. **Vision with templates that ignore the internal `media_marker` part type**
+   (`common/chat.cpp`, `render_message_to_json`): when a chat template advertises support for
+   *neither* string nor typed content (caps detection failed — the "Neither string content nor
+   typed content" warning), fall back to **string** content (marker preserved inline) instead of
+   typed parts. Otherwise such a template drops the server's `media_marker` part, leaving 0 image
+   markers for an attached image and `mtmd` aborts with `number of bitmaps (1) does not match
+   number of markers (0)`. Hit with the Gemma 4 12B coder finetune; fix is general. Full
+   12B-vision writeup (encoder-free `gemma4uv`, the PR#24118 conversion bug, the mmproj swap):
+   [`docs/development/gemma4-12b-vision.md`](docs/development/gemma4-12b-vision.md).
 
 Net effect: Gemma 4 MTP speculative decoding runs with `--n-cpu-moe` **and** `--mmproj`
 (vision) on a single server, drafting on text turns and falling back cleanly on image turns;

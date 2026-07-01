@@ -364,10 +364,19 @@ static json render_message_to_json(const std::vector<common_chat_msg> & msgs, co
 
     bool only_string_accepted =  c.supports_string_content && !c.supports_typed_content;
     bool only_typed_accepted  = !c.supports_string_content &&  c.supports_typed_content;
+    // When the template advertises support for neither string nor typed content, caps
+    // detection effectively failed (the warning above fired). Fall back to STRING content
+    // (parts concatenated, media markers preserved inline) rather than typed parts: a
+    // template that doesn't recognize the internal "media_marker" part type would silently
+    // drop it, producing a prompt with 0 image markers for an attached image, after which
+    // mtmd aborts with "number of bitmaps does not match number of markers". String content
+    // flows through the same path that already works for this template's text-only turns.
+    bool neither_accepted     = !c.supports_string_content && !c.supports_typed_content;
+    bool use_string_content   = only_string_accepted || neither_accepted;
 
     json messages = json::array();
     for (const auto & msg : msgs) {
-        if (only_string_accepted) {
+        if (use_string_content) {
             json jmsg = msg.to_json_oaicompat(/* concat_typed_text= */ true);
             messages.push_back(jmsg);
         } else if (only_typed_accepted) {

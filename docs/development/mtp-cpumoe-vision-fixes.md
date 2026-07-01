@@ -186,9 +186,43 @@ level and buffered out of order.
 All `LLAMA_MTP_TRACE` instrumentation has been removed post-fix. The four fixes
 above remain.
 
+## Fix 5 — vision breaks on templates that ignore the `media_marker` part type
+
+Symptom (e.g. Gemma 4 12B coder finetune): text turns work, but the first image turn
+fails with
+
+```
+render_message_to_json: Neither string content nor typed content is supported by the template.
+tokenize: error: number of bitmaps (1) does not match number of markers (0)
+```
+
+Cause. On an OAI `/v1/chat/completions` request with an image, the server rewrites the
+image content part into a part of type **`media_marker`** whose text is the mtmd marker
+`<__media__>` (`tools/server/server-common.cpp`, ~L1028). `render_message_to_json`
+(`common/chat.cpp`) then chooses how to present content to the Jinja template from the
+template's detected `jinja::caps`:
+
+- `supports_string_content` only → parts concatenated to a string (marker preserved inline).
+- `supports_typed_content` only / both → content handed over as an array of typed parts,
+  including `{type:"media_marker", text:"<__media__>"}`.
+
+The 12B's template advertises **neither** (caps detection fails — that's the warning). The
+original code's fallback for the neither-case was the *typed-parts* path. The template's
+content loop only handles `text`/`image`/`audio`/`video` types and has no `media_marker`
+branch, so the marker part is silently dropped → 0 markers in the prompt → `mtmd` aborts
+against the 1 attached bitmap. The 26B works only because its template is detected as
+string-capable, so the marker survives as inline text.
+
+Fix (`common/chat.cpp`, `render_message_to_json`): when the template supports neither form,
+fall back to **string** content (concatenated, marker inline) rather than typed parts. This
+is the same string path text-only turns already use for this template, so there is no
+regression, and it is general — any model whose template doesn't know the internal
+`media_marker` type now works.
+
 ## Files changed (fixes only, after instrumentation removal)
 
 - `tools/server/server-common.h` — `has_media()`
 - `tools/server/server-context.cpp` — draft gate, prime gate
 - `src/llama-model.cpp` — skip decode epilogue for MTP graphs
 - `src/llama-context.cpp` — `sched_mtp` op_offload = false
+- `common/chat.cpp` — `render_message_to_json` neither-caps fallback to string content (Fix 5)
