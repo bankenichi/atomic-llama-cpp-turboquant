@@ -54,6 +54,15 @@ Authoritative writeup: [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/deve
    `register_host` (GetSystemInfo page size) so it actually pins on this Windows build; the
    original was POSIX-only. Both ports documented in
    [`docs/development/thecodacus-prefetch-mmap-port.md`](docs/development/thecodacus-prefetch-mmap-port.md).
+10. **NextN (Qwen) speculative decoding: synchronous multi-step by default**
+    (`common/speculative.cpp`, `common_speculative_state_nextn`). The class already contained a
+    correct synchronous multi-step draft (`for k < n_max` AR loop — equivalent to the reference
+    MTP impl), but defaulted to an async "depth-2" worker that hardcaps drafting at **1 token/round**,
+    leaving Qwen decode ~30% slower than a multi-step build. Flipped `pipeline_enabled` to default
+    **false** so the sync path (drafts up to `--draft-max` tokens/round) is the default; the async
+    worker is now opt-in via `LLAMA_PIPELINE_DEPTH2=1`. **NextN-only — the Gemma MTP path
+    (`common_speculative_state_mtp`, `--spec-type mtp`) is a separate class and is untouched.**
+    Launcher `-Qwen` now passes `--draft-max 2`.
 
 Net effect: Gemma 4 MTP speculative decoding runs with `--n-cpu-moe` **and** `--mmproj`
 (vision) on a single server, drafting on text turns and falling back cleanly on image turns;
