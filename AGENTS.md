@@ -98,7 +98,11 @@ can be raised via the two opt-in env gates above.
 
 ## Docs map
 
+- `docs/development/performance-features.md` — **runtime perf toggles + usage** (prefetch,
+  mmap host-pin, NextN sync multi-step) with a quick-reference table and the launcher flag map.
 - `docs/development/mtp-cpumoe-vision-fixes.md` — fixes + full tuning notes (**authoritative**).
+- `docs/development/thecodacus-prefetch-mmap-port.md` — prefetch/mmap-pin port rationale + patches.
+- `docs/development/gemma4-12b-vision.md` — Gemma 4 12B encoder-free vision.
 - `MTP.md`, `NEXTN.md`, `docs/speculative.md` — fork speculative-decoding internals.
 - `README.md` — trimmed for this fork; headline features + upstream usage reference.
 - `NOTICE.md` — lineage / attribution.

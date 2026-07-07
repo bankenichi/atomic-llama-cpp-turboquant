@@ -29,6 +29,16 @@ Fixes carried in this tree (detail in the doc above):
 
 **Result:** one server doing text + vision, MTP drafting on text turns (graceful fallback on image turns), and CPU-MoE offload to fit the 26B in 16 GB. Practical tuning — the ~15 GB VRAM ceiling, `--n-cpu-moe` as the dominant gen-speed lever, and why MTP is roughly break-even on a CPU-offloaded MoE — is documented in the same writeup.
 
+### Performance additions
+
+Beyond the fixes, this tree adds throughput features for the CPU-offloaded MoE path. Full usage, requirements, and interactions are in [`docs/development/performance-features.md`](docs/development/performance-features.md).
+
+| Feature | Enable | What it does |
+|---|---|---|
+| Expert-upload prefetch | env `GGML_SCHED_PREFETCH_EXPERTS=1` | During prefill, overlaps offloaded MoE expert H2D uploads with compute on a second stream (needs `--n-cpu-moe`). Ported from [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp). |
+| mmap host-pin | env `GGML_CUDA_REGISTER_HOST=1` | Pins mmap-backed CPU weights for DMA H2D — revives dead upstream code and adds a Windows path. Alternative to `--no-mmap`. |
+| NextN synchronous multi-step | on by default | Qwen 3.6 NextN drafts up to `--draft-max` tokens per round (was hard-capped at 1); the async single-step worker is now opt-in via `LLAMA_PIPELINE_DEPTH2=1`. Gemma MTP path unaffected. |
+
 Inherited fork features (from the parent; each has its own section below): **Gemma 4 MTP**, **Qwen 3.6 NextN**, and **TurboQuant KV / weight compression**.
 
 ----
