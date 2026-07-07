@@ -610,12 +610,50 @@ struct llama_mmap::impl {
 };
 
 llama_mmap::llama_mmap(struct llama_file * file, size_t prefetch, bool numa) : pimpl(std::make_unique<impl>(file, prefetch, numa)) {}
-llama_mmap::~llama_mmap() = default;
+
+llama_mmap::~llama_mmap() {
+    // unpin before the pages are unmapped by the impl destructor
+    if (host_reg_addr && host_unreg_fn) {
+        host_unreg_fn(host_reg_addr);
+    }
+}
 
 size_t llama_mmap::size() const { return pimpl->size; }
 void * llama_mmap::addr() const { return pimpl->addr; }
 
 void llama_mmap::unmap_fragment(size_t first, size_t last) { pimpl->unmap_fragment(first, last); }
+
+size_t llama_mmap::register_host(size_t first, size_t last, bool (*reg_fn)(void *, size_t), void (*unreg_fn)(void *)) {
+    if (host_reg_addr || !reg_fn || !unreg_fn || last <= first) {
+        return 0;
+    }
+
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const size_t page_size = (size_t) si.dwPageSize;
+#elif defined(_POSIX_MAPPED_FILES)
+    const size_t page_size = (size_t) sysconf(_SC_PAGESIZE);
+#else
+    (void) first; (void) last; (void) reg_fn; (void) unreg_fn;
+    return 0;
+#endif
+
+#if defined(_WIN32) || defined(_POSIX_MAPPED_FILES)
+    // expand outward to the page boundaries retained by unmap_fragment
+    first = first & ~(page_size - 1);
+    last  = (last + page_size - 1) & ~(page_size - 1);
+
+    void * reg_addr = (char *) pimpl->addr + first;
+    if (!reg_fn(reg_addr, last - first)) {
+        return 0;
+    }
+
+    host_reg_addr = reg_addr;
+    host_unreg_fn = unreg_fn;
+    return last - first;
+#endif
+}
 
 #if defined(_POSIX_MEMLOCK_RANGE) || defined(_WIN32)
 const bool llama_mmap::SUPPORTED  = true;

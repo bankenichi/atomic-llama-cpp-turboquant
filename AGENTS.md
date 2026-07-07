@@ -39,10 +39,26 @@ Authoritative writeup: [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/deve
    number of markers (0)`. Hit with the Gemma 4 12B coder finetune; fix is general. Full
    12B-vision writeup (encoder-free `gemma4uv`, the PR#24118 conversion bug, the mmproj swap):
    [`docs/development/gemma4-12b-vision.md`](docs/development/gemma4-12b-vision.md).
+8. **Expert-weight prefetch overlap** (`ggml/src/ggml-backend.cpp`): ported from
+   `thecodacus/llama.cpp` (`fable5/prefetch-experts`). During prefill, upload offloaded
+   `MUL_MAT_ID` expert tensors through a second same-device backend instance (own stream) into
+   rotating event-ordered staging slots, so upload N+1 overlaps compute N instead of blocking on
+   the routing-id readback. Opt-in: env `GGML_SCHED_PREFETCH_EXPERTS=1` (value = slot count,
+   default 3 = one MoE layer) **and** `op_offload`/`--n-cpu-moe` active. Default behavior
+   unchanged. Speeds the `n-cpu-moe` prefill both stacks bottleneck on.
+9. **Pin mmap-backed CPU weights** (`src/llama-mmap.{cpp,h}`, `src/llama-model-loader.cpp`):
+   ported from the same branch. After load, `cudaHostRegister` the mmap pages of the retained
+   (CPU-resident) weights via the backend's `ggml_backend_register_host_buffer` proc — previously
+   dead code, now wired up — so H2D expert streaming uses DMA. Opt-in: env
+   `GGML_CUDA_REGISTER_HOST=1`. **Fork addition beyond upstream:** a `_WIN32` branch in
+   `register_host` (GetSystemInfo page size) so it actually pins on this Windows build; the
+   original was POSIX-only. Both ports documented in
+   [`docs/development/thecodacus-prefetch-mmap-port.md`](docs/development/thecodacus-prefetch-mmap-port.md).
 
 Net effect: Gemma 4 MTP speculative decoding runs with `--n-cpu-moe` **and** `--mmproj`
 (vision) on a single server, drafting on text turns and falling back cleanly on image turns;
-context shift works with vision on every KV type.
+context shift works with vision on every KV type; and prefill throughput on CPU-offloaded MoE
+can be raised via the two opt-in env gates above.
 
 ## Building (Windows + CUDA)
 
