@@ -76,7 +76,14 @@ that used to OOM the 35B-A3B target on Apple Silicon (38 GB unified memory). See
   and switches to the shared-model path (no second model load). Pointing at a standalone
   NEXTN_ONLY GGUF (`general.architecture = qwen35*_mtp`) still works but loads a second
   `llama_model`.
-- `--draft-max` / `--spec-draft-n-max` — max chained draft tokens per round (see `common` / server arg naming).
+- `--draft-max N` (aliases `--draft` / `--draft-n`) and `--draft-min` — draft chain length per
+  round. **2 is the sweet spot** on CUDA; deeper chains lose acceptance. Without `--draft-max`
+  the default is 16 (over-drafts) — always set it.
+- **Draft mode (this fork):** drafting is **synchronous multi-step by default** — `draft()` chains
+  up to `--draft-max` tokens per round. An experimental async single-step overlap worker (overlaps
+  one draft with the next verify but caps drafting at 1 token/round) is **opt-in via
+  `LLAMA_NEXTN_ASYNC=1`**; it underperforms multi-step sync drafting on CUDA. This is a NextN-only
+  knob, distinct from Gemma MTP's `LLAMA_PIPELINE_DEPTH2`.
 - Gemma MTP flags (`--mtp-head`, `llama_decode_mtp_*`, `llama_model_load_mtp_from_file`) are **unchanged**.
 
 ---
@@ -136,6 +143,13 @@ NextN draft DM=2 (single async chain), context 8192. Single-slot
 shared-model draft path (no second mmap of combined `_MTP.gguf`),
 AtomicChat **`UDT-Q4_K_XL_MTP`** file. See
 `.scratch/bench-logs/qwen-udt-ab-20260513-132549.md`.
+
+> **Draft-mode note.** These Apple-Silicon numbers were taken with the async single-chain overlap
+> path. On this fork the **default is now synchronous multi-step drafting** (chains `--draft-max`
+> tokens per round), which is faster on CUDA; the async path is opt-in via `LLAMA_NEXTN_ASYNC=1`.
+> The NextN-vs-base *relative* wins below still hold, but absolute t/s depends on hardware and
+> draft depth. (E.g. on Windows + RTX 5080, 35B-A3B with `turbo4/turbo3` KV and `--draft-max 2`
+> decodes ~50 t/s at a ~0.43 accept rate on a 64k prompt.)
 
 ### Bench host
 

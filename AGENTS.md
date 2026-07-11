@@ -60,7 +60,8 @@ Authoritative writeup: [`docs/development/mtp-cpumoe-vision-fixes.md`](docs/deve
     MTP impl), but defaulted to an async "depth-2" worker that hardcaps drafting at **1 token/round**,
     leaving Qwen decode ~30% slower than a multi-step build. Flipped `pipeline_enabled` to default
     **false** so the sync path (drafts up to `--draft-max` tokens/round) is the default; the async
-    worker is now opt-in via `LLAMA_PIPELINE_DEPTH2=1`. **NextN-only — the Gemma MTP path
+    worker is now opt-in via `LLAMA_NEXTN_ASYNC=1` (a NextN-only env var, deliberately distinct
+    from Gemma MTP's `LLAMA_PIPELINE_DEPTH2`). **NextN-only — the Gemma MTP path
     (`common_speculative_state_mtp`, `--spec-type mtp`) is a separate class and is untouched.**
     Launcher `-Qwen` now passes `--draft-max 2`.
 

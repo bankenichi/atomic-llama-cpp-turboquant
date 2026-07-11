@@ -14,7 +14,7 @@ Related docs: [`mtp-cpumoe-vision-fixes.md`](mtp-cpumoe-vision-fixes.md) (MTP/vi
 |---|---|---|---|
 | Expert-upload prefetch | env `GGML_SCHED_PREFETCH_EXPERTS=1` (value = slot count, default 3) | `--n-cpu-moe` (op_offload); keep `--no-mmap` | Overlaps expert H2D with compute during prefill. Biggest prefill win. |
 | mmap host-pin | env `GGML_CUDA_REGISTER_HOST=1` | mmap on (i.e. **omit** `--no-mmap`) | Pins mmap CPU weights. Alternative to `--no-mmap`; **negates prefetch** — don't combine. |
-| NextN sync multi-step | default on | `--spec-type nextn --model-draft <gguf>`, `--draft-max N` | Drafts N tokens/round. Async single-step is opt-in via `LLAMA_PIPELINE_DEPTH2=1`. |
+| NextN sync multi-step | default on | `--spec-type nextn --model-draft <gguf>`, `--draft-max N` | Drafts N tokens/round. Async single-step is opt-in via `LLAMA_NEXTN_ASYNC=1`. |
 
 ---
 
@@ -63,9 +63,10 @@ it is no longer the default. See AGENTS.md mod #10.
 `override_arch`), plus `--draft-max N` for the draft depth (**2 is the sweet spot**; deeper drafts
 lose acceptance). Default on; nothing extra needed beyond the flags.
 
-**Async worker (opt-in):** `set LLAMA_PIPELINE_DEPTH2=1` re-enables the single-step async overlap
+**Async worker (opt-in):** `set LLAMA_NEXTN_ASYNC=1` re-enables the single-step async overlap
 path. Not recommended on CUDA (single-step underperforms multi-step); kept for future work on a
-proper multi-step async pipeline.
+proper multi-step async pipeline. This is a NextN-only knob — distinct from Gemma MTP's
+`LLAMA_PIPELINE_DEPTH2` (which is unrelated and unaffected).
 
 **Scope:** NextN-only. Gemma MTP (`--spec-type mtp`, `common_speculative_state_mtp`) is a separate
 class and is unaffected by any of the above.

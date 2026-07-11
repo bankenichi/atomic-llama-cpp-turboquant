@@ -964,12 +964,13 @@ struct common_speculative_state_nextn : public common_speculative_state {
     // which mirrors the reference MTP implementation and drafts up to --draft-max tokens
     // per round. This is the correct/high-throughput path on CUDA.
     //
-    // The async "depth-2" worker (opt-in via LLAMA_PIPELINE_DEPTH2=1) overlaps one draft
+    // The async single-step worker (opt-in via LLAMA_NEXTN_ASYNC=1) overlaps one draft
     // compute with the next verify, but caps drafting at a single token per round and
     // underperforms multi-step sync drafting — so it is no longer the default.
     //
-    // NextN-only: Gemma MTP (common_speculative_state_mtp) is a separate class and is
-    // completely unaffected by this flag.
+    // NextN-only: Gemma MTP (common_speculative_state_mtp) is a separate class with its own
+    // depth-2 overlap gated by LLAMA_PIPELINE_DEPTH2 (on-unless-0); it is unaffected by this
+    // flag and by LLAMA_NEXTN_ASYNC. The two env vars are deliberately distinct.
     bool pipeline_enabled = false;
 
     std::thread             worker_thread;
@@ -1013,9 +1014,9 @@ struct common_speculative_state_nextn : public common_speculative_state {
         llama_set_embeddings_pre_norm(ctx_nextn, true);
         llama_set_nextn(ctx_tgt, ctx_nextn);
 
-        // Opt-in to the experimental async single-step overlap worker. Default is the
-        // synchronous multi-step draft path (matches the reference MTP impl).
-        if (const char * v = std::getenv("LLAMA_PIPELINE_DEPTH2")) {
+        // Opt-in to the experimental async single-step overlap worker (distinct from Gemma
+        // MTP's LLAMA_PIPELINE_DEPTH2). Default is the synchronous multi-step draft path.
+        if (const char * v = std::getenv("LLAMA_NEXTN_ASYNC")) {
             if (std::strcmp(v, "1") == 0) {
                 pipeline_enabled = true;
             }

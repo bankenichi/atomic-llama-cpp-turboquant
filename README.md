@@ -37,7 +37,7 @@ Beyond the fixes, this tree adds throughput features for the CPU-offloaded MoE p
 |---|---|---|
 | Expert-upload prefetch | env `GGML_SCHED_PREFETCH_EXPERTS=1` | During prefill, overlaps offloaded MoE expert H2D uploads with compute on a second stream (needs `--n-cpu-moe`). Ported from [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp). |
 | mmap host-pin | env `GGML_CUDA_REGISTER_HOST=1` | Pins mmap-backed CPU weights for DMA H2D — revives dead upstream code and adds a Windows path. Alternative to `--no-mmap`. |
-| NextN synchronous multi-step | on by default | Qwen 3.6 NextN drafts up to `--draft-max` tokens per round (was hard-capped at 1); the async single-step worker is now opt-in via `LLAMA_PIPELINE_DEPTH2=1`. Gemma MTP path unaffected. |
+| NextN synchronous multi-step | on by default | Qwen 3.6 NextN drafts up to `--draft-max` tokens per round (was hard-capped at 1); the async single-step worker is now opt-in via `LLAMA_NEXTN_ASYNC=1`. Gemma MTP path unaffected. |
 
 Inherited fork features (from the parent; each has its own section below): **Gemma 4 MTP**, **Qwen 3.6 NextN**, and **TurboQuant KV / weight compression**.
 
@@ -203,8 +203,10 @@ Highlights:
   (`kv_only_nextn = true`).
 - **Composes with TurboQuant3 KV** (`-ctk turbo3 -ctv turbo3`) — on MoE
   targets the combination is the recommended default.
-- **Same async / depth-2 pipeline** as Gemma MTP; pre-norm hidden states
-  flow from the target via the `embeddings_pre_norm` path.
+- **Synchronous multi-step drafting by default** — chains up to `--draft-max` tokens per round
+  (`--draft-max 2` is the CUDA sweet spot); pre-norm hidden states flow from the target via the
+  `embeddings_pre_norm` path. An async single-step overlap worker is opt-in via
+  `LLAMA_NEXTN_ASYNC=1` (distinct from Gemma MTP's `LLAMA_PIPELINE_DEPTH2`).
 
 ### Pre-built model GGUFs
 
