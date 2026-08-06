@@ -430,6 +430,10 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
+        // Prism group-128 Q2_0. Upstream type 42 remains the distinct group-64
+        // encoding; historical Bonsai files using type 42 with this layout are
+        // normalized by the GGUF loader after physical-layout validation.
+        GGML_TYPE_Q2_0_G128 = 142,
 
         // Personal-fork private types. Keep these out of the upstream/Prism GGUF
         // type range; legacy files that used the old 42-46 IDs are remapped by
@@ -485,6 +489,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q2_0_G128 = 128, // except 1d tensors (Prism-private group-128 Q2_0)
     };
 
     // available tensor operations:
