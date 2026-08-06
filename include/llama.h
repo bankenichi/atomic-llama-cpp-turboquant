@@ -156,6 +156,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q2_0_G128     = 142, // except 1d tensors (Prism group-128 Q2_0)
 
         // Personal-fork private quantization file types. Keep these outside
         // the upstream range for the same reason as the private ggml types.
