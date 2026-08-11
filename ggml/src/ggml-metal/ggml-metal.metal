@@ -3934,6 +3934,7 @@ void kernel_mul_mv_q2_0_f32_impl(
     }
 }
 
+template<int nr0, typename args_t>
 void kernel_mul_mv_q2_0_g128_f32_impl(
         args_t args,
         device const char * src0,
