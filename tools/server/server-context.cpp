@@ -335,7 +335,10 @@ struct server_slot {
         stopping_word  = "";
         n_sent_text    = 0;
 
-        if (can_speculate()) {
+        // Clear per-slot speculative state even when the request contained media.
+        // Media requests deliberately make can_speculate() false, but may reuse a
+        // slot that still owns state from an earlier text-only request.
+        if (spec) {
             spec_draft.clear();
             spec_i_batch.clear();
             spec_ckpt.clear();
@@ -407,6 +410,7 @@ struct server_slot {
 
         return task->type == other_slot.task->type
             && inp_embd.size() == other_slot.inp_embd.size()
+            && task->tokens.has_media() == other_slot.task->tokens.has_media()
             && are_lora_equal(lora, other_slot.lora);
     }
 
@@ -424,7 +428,12 @@ struct server_slot {
     }
 
     bool can_speculate() const {
-        return !!spec;
+        // Draft models consume target-model hidden states for every prompt
+        // position. Image/audio positions have embeddings, not target token
+        // hidden states that can safely be mirrored into the draft context.
+        // Keep the draft model loaded and available for text-only requests, but
+        // disable it for the complete lifetime of a request containing media.
+        return !!spec && (!task || !task->tokens.has_media());
     }
 
     void add_token(const completion_token_output & token) {
@@ -706,7 +715,7 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
         if (mbatch) {
             float * embd = mtmd_batch_get_output_embd(mbatch.get(), chunk.get());
             if (embd) {
-                void * cb_data = slot.spec;
+                void * cb_data = slot.can_speculate() ? slot.spec : nullptr;
                 static auto cb = [](llama_batch batch, void * user_data) {
                     common_speculative * spec = static_cast<common_speculative *>(user_data);
                     if (!common_speculative_process(spec, batch)) {
@@ -714,6 +723,7 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
                     }
                     return 0;
                 };
+                mtmd_helper_post_decode_callback post_decode_cb = cb_data ? +cb : nullptr;
 
                 llama_pos new_n_past; // unused for now
                 res = mtmd_helper_decode_image_chunk(
@@ -725,7 +735,7 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
                     slot.id,
                     llama_n_batch(slot.ctx_tgt),
                     &new_n_past,
-                    cb,
+                    post_decode_cb,
                     cb_data
                 );
                 if (res != 0) {
@@ -3671,7 +3681,11 @@ private:
         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
         //       for now, always re-evaluate for simplicity
         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
-        if (spec) {
+        // Batches are homogeneous with respect to real media (enforced by
+        // can_batch_with()). Do not mirror any part of a multimodal request into
+        // the draft context: text chunks surrounding an image would otherwise
+        // leave the draft at positions that cannot match the target context.
+        if (spec && batch.slot_batched && batch.slot_batched->can_speculate()) {
             bool ok = true;
             queue_tasks.yield_to_queue([&]() {
                 ok = common_speculative_process(spec.get(), batch_view);

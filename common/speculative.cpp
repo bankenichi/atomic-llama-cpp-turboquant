@@ -956,11 +956,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
 
-        // read the trained block size from the dflash.block_size metadata key
+        // Modern DFlash and the original Prism DSpark exporter use different
+        // metadata namespaces for the same block-diffusion runtime contract.
         block_size = 16;
         {
             char buf[32] = {};
-            if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0) {
+            if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0 ||
+                llama_model_meta_val_str(model_dft, "dspark.dspark.block_size", buf, sizeof(buf)) >= 0) {
                 block_size = std::atoi(buf);
             }
             if (llama_model_meta_val_str(model_dft, "dflash.sample_from_anchor", buf, sizeof(buf)) >= 0) {
@@ -968,6 +970,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             }
         }
         mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
+        if (mask_token_id == LLAMA_TOKEN_NULL) {
+            char buf[32] = {};
+            if (llama_model_meta_val_str(model_dft, "dspark.dspark.mask_token_id", buf, sizeof(buf)) >= 0) {
+                mask_token_id = (llama_token) std::atoi(buf);
+            }
+        }
+        if (mask_token_id == LLAMA_TOKEN_NULL) {
+            throw std::runtime_error("DSpark draft model has no mask token id");
+        }
 
         LOG_INF("%s: adding speculative implementation '%s'\n", __func__, common_speculative_type_to_str(type).c_str());
         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
@@ -2252,7 +2263,7 @@ std::vector<common_speculative_type> common_speculative_types_from_gguf(const st
     }
 
     const std::string arch = gguf_get_val_str(gguf_ctx.get(), arch_id);
-    if (arch != "dflash") {
+    if (arch != "dflash" && arch != "dspark") {
         const uint32_t block_count = gguf_get_val_u32(gguf_ctx.get(), gguf_find_key(gguf_ctx.get(), (arch + ".block_count").c_str()));
 
         if (gguf_find_tensor(gguf_ctx.get(), ("blk." + std::to_string(block_count - 1) + ".nextn.eh_proj.weight").c_str()) >= 0) {
@@ -2263,7 +2274,9 @@ std::vector<common_speculative_type> common_speculative_types_from_gguf(const st
     }
 
     // the Markov head distinguishes draft-dspark from draft-dflash
-    const auto type = gguf_find_tensor(gguf_ctx.get(), "markov_w1.weight") >= 0
+    const bool has_markov = gguf_find_tensor(gguf_ctx.get(), "markov_w1.weight") >= 0 ||
+                            gguf_find_tensor(gguf_ctx.get(), "dspark.markov_head_a.weight") >= 0;
+    const auto type = has_markov
                     ? COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK
                     : COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
 

@@ -239,6 +239,24 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     // ms.add_kv(LLM_KV_DENSE_2_FEAT_OUT,     n_embd);
     // ms.add_kv(LLM_KV_DENSE_3_FEAT_IN,      n_embd);
 
+    if (arch == LLM_ARCH_DSPARK) {
+        const std::vector<int32_t> target_layers = { 0 };
+        gguf_set_arr_data(ret.get(), "dspark.dspark.target_layers", GGUF_TYPE_INT32,
+                target_layers.data(), target_layers.size());
+        gguf_set_val_u32(ret.get(), "dspark.dspark.block_size", 4);
+        gguf_set_val_u32(ret.get(), "dspark.dspark.mask_token_id", n_vocab - 1);
+        gguf_set_val_bool(ret.get(), "dspark.dspark.log_snr_conditioning", true);
+        gguf_set_val_f32(ret.get(), "dspark.dspark.min_log_snr", -20.0f);
+        gguf_set_val_f32(ret.get(), "dspark.dspark.max_log_snr", 20.0f);
+
+        // Presence of the legacy Markov tensor selects the DSpark head and
+        // exercises every old dspark.* tensor-name mapping in virtual load mode.
+        ggml_tensor t = {};
+        t.type = GGML_TYPE_F16;
+        ggml_set_name(&t, "dspark.markov_head_a.weight");
+        gguf_add_tensor(ret.get(), &t);
+    }
+
     if (moe) {
         ms.add_kv(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, n_ff);
         ms.add_kv(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, n_ff / 2);  // distinct from n_ff so a saver key-clobber surfaces on reload

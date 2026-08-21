@@ -5,24 +5,37 @@
 #include "llama-kv-cache-iswa.h"
 
 void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
+    const bool legacy_dspark = arch == LLM_ARCH_DSPARK;
 
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
-    if (!ml.get_arr(LLM_KV_TARGET_LAYERS, target_layer_ids, false)) {
-        throw std::runtime_error("DFlash model requires 'target_layers' in GGUF metadata");
+    const bool has_target_layers = legacy_dspark
+        ? ml.get_arr("dspark.dspark.target_layers", target_layer_ids, false)
+        : ml.get_arr(LLM_KV_TARGET_LAYERS, target_layer_ids, false);
+    if (!has_target_layers) {
+        throw std::runtime_error(arch_name() + " model requires 'target_layers' in GGUF metadata");
     }
 
     hparams.n_embd_inp_enc_impl = (uint32_t) target_layer_ids.size() * hparams.n_embd;
 
     // dspark GIDD log-SNR conditioning (drafters trained with the GIDD bundle) --
     // absent on every other drafter, must default off
-    ml.get_key(LLM_KV_LOG_SNR_CONDITIONING, hparams.dspark_log_snr_conditioning, false);
+    if (legacy_dspark) {
+        ml.get_key("dspark.dspark.log_snr_conditioning", hparams.dspark_log_snr_conditioning, false);
+    } else {
+        ml.get_key(LLM_KV_LOG_SNR_CONDITIONING, hparams.dspark_log_snr_conditioning, false);
+    }
     if (hparams.dspark_log_snr_conditioning) {
         // required once the flag is set: silently defaulting either bound to 0.0f
         // would collapse (max_snr - min_snr) to zero in the featurizer and fill
         // the conditioning input with NaNs instead of failing to load
-        ml.get_key(LLM_KV_MIN_LOG_SNR, hparams.dspark_min_log_snr, true);
-        ml.get_key(LLM_KV_MAX_LOG_SNR, hparams.dspark_max_log_snr, true);
+        if (legacy_dspark) {
+            ml.get_key("dspark.dspark.min_log_snr", hparams.dspark_min_log_snr, true);
+            ml.get_key("dspark.dspark.max_log_snr", hparams.dspark_max_log_snr, true);
+        } else {
+            ml.get_key(LLM_KV_MIN_LOG_SNR, hparams.dspark_min_log_snr, true);
+            ml.get_key(LLM_KV_MAX_LOG_SNR, hparams.dspark_max_log_snr, true);
+        }
         if (!std::isfinite(hparams.dspark_min_log_snr) || !std::isfinite(hparams.dspark_max_log_snr)) {
             throw std::runtime_error("dspark log-SNR conditioning: min/max_log_snr must be finite");
         }
@@ -38,7 +51,7 @@ void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
         layers += std::to_string(id);
         sep = ", ";
     }
-    LLAMA_LOG_INFO("%s: DFlash extract_layers = [%s]\n", __func__, layers.c_str());
+    LLAMA_LOG_INFO("%s: %s extract_layers = [%s]\n", __func__, arch_name().c_str(), layers.c_str());
 
     // DeepSeek-V4 DSpark backbone: stages are full DSV4 blocks, uniform sliding window (the draft KV ring)
     ml.get_key(LLM_KV_HYPER_CONNECTION_COUNT, hparams.dsv4_hc_mult, false);
@@ -99,12 +112,22 @@ void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
 void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
     LLAMA_LOAD_LOCALS;
 
+    const bool legacy_dspark = arch == LLM_ARCH_DSPARK;
     const int64_t n_embd_inp = hparams.n_embd_inp_enc();
 
-    tok_embd        = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD,       "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+    int64_t n_vocab_model = n_vocab;
+    if (legacy_dspark) {
+        const ggml_tensor * tok_embd_meta = ml->get_tensor_meta("token_embd.weight");
+        if (tok_embd_meta) {
+            n_vocab_model = tok_embd_meta->ne[1];
+        }
+        if (n_vocab_model <= 0) {
+            throw std::runtime_error("dspark: could not determine vocabulary size from token_embd.weight");
+        }
+    }
 
     // reduced draft vocab (optional): d2t maps draft rows to target token ids
-    int64_t n_vocab_draft = n_vocab;
+    int64_t n_vocab_draft = n_vocab_model;
     const struct ggml_tensor * d2t_meta = ml->get_tensor_meta("d2t");
     if (d2t_meta) {
         n_vocab_draft = d2t_meta->ne[0];
@@ -116,15 +139,20 @@ void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
     //
     // TODO: only Qwen3-style backbones are supported for now; other backbones (e.g. Gemma4)
     //       need their own conversion path and graph tweaks
-    const struct ggml_tensor * markov_meta = ml->get_tensor_meta("markov_w1.weight");
+    const char * markov_name = legacy_dspark ? "dspark.markov_head_a.weight" : "markov_w1.weight";
+    const struct ggml_tensor * markov_meta = ml->get_tensor_meta(markov_name);
     if (markov_meta) {
         const int64_t dspark_markov_rank = markov_meta->ne[0];
 
-        dspark_markov_w1 = create_tensor(tn(LLM_TENSOR_DSPARK_MARKOV_W1, "weight"), { dspark_markov_rank, n_vocab }, 0);
-        dspark_markov_w2 = create_tensor(tn(LLM_TENSOR_DSPARK_MARKOV_W2, "weight"), { dspark_markov_rank, n_vocab_draft }, 0);
+        const llm_tensor markov_w1 = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_MARKOV_W1 : LLM_TENSOR_DSPARK_MARKOV_W1;
+        const llm_tensor markov_w2 = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_MARKOV_W2 : LLM_TENSOR_DSPARK_MARKOV_W2;
+        const llm_tensor conf_proj = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_CONF_PROJ : LLM_TENSOR_DSPARK_CONF_PROJ;
 
-        dspark_conf_proj   = create_tensor(tn(LLM_TENSOR_DSPARK_CONF_PROJ, "weight"), { n_embd + dspark_markov_rank, 1 }, 0);
-        dspark_conf_proj_b = create_tensor(tn(LLM_TENSOR_DSPARK_CONF_PROJ, "bias"),   { 1 },             TENSOR_NOT_REQUIRED);
+        dspark_markov_w1 = create_tensor(tn(markov_w1, "weight"), { dspark_markov_rank, n_vocab_model }, 0);
+        dspark_markov_w2 = create_tensor(tn(markov_w2, "weight"), { dspark_markov_rank, n_vocab_draft }, 0);
+
+        dspark_conf_proj   = create_tensor(tn(conf_proj, "weight"), { n_embd + dspark_markov_rank, 1 }, 0);
+        dspark_conf_proj_b = create_tensor(tn(conf_proj, "bias"),   { 1 },             TENSOR_NOT_REQUIRED);
 
         LLAMA_LOG_INFO("%s: DFlash with DSpark markov head (rank = %lld)\n", __func__, (long long) dspark_markov_rank);
     }
@@ -137,22 +165,26 @@ void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
     // silently dropped these 4 tensors and invalidated a measurement)
     if (hparams.dspark_log_snr_conditioning) {
         const int64_t n_freq = 128; // matches LogSnrEmbed.NUM_FREQ_FEATURES
-        dspark_log_snr_fc1_w = create_tensor(tn(LLM_TENSOR_DSPARK_LOG_SNR_FC1, "weight"), { n_freq, n_embd }, 0);
-        dspark_log_snr_fc1_b = create_tensor(tn(LLM_TENSOR_DSPARK_LOG_SNR_FC1, "bias"),   { n_embd },         0);
-        dspark_log_snr_fc2_w = create_tensor(tn(LLM_TENSOR_DSPARK_LOG_SNR_FC2, "weight"), { n_embd, n_embd }, 0);
-        dspark_log_snr_fc2_b = create_tensor(tn(LLM_TENSOR_DSPARK_LOG_SNR_FC2, "bias"),   { n_embd },         0);
+        const llm_tensor log_snr_fc1 = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_LOG_SNR_FC1 : LLM_TENSOR_DSPARK_LOG_SNR_FC1;
+        const llm_tensor log_snr_fc2 = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_LOG_SNR_FC2 : LLM_TENSOR_DSPARK_LOG_SNR_FC2;
+        dspark_log_snr_fc1_w = create_tensor(tn(log_snr_fc1, "weight"), { n_freq, n_embd }, 0);
+        dspark_log_snr_fc1_b = create_tensor(tn(log_snr_fc1, "bias"),   { n_embd },         0);
+        dspark_log_snr_fc2_w = create_tensor(tn(log_snr_fc2, "weight"), { n_embd, n_embd }, 0);
+        dspark_log_snr_fc2_b = create_tensor(tn(log_snr_fc2, "bias"),   { n_embd },         0);
     }
 
     // optional drafter-own token embeddings and lm_head: when present the
     // decoder graph prefers them over the target's (borrowed via ctx_other).
     // Load-bearing for low-bit targets: borrowing means the drafter runs the
     // target's quantized tok_embd/output, which measurably costs accept rate.
-    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
-    output   = create_tensor(tn(LLM_TENSOR_OUTPUT,     "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab_model }, TENSOR_NOT_REQUIRED);
+    output   = create_tensor(tn(LLM_TENSOR_OUTPUT,     "weight"), { n_embd, n_vocab_draft }, TENSOR_NOT_REQUIRED);
 
-    fc              = create_tensor(tn(LLM_TENSOR_FC,              "weight"), { n_embd_inp, n_embd }, 0);
-    fc_s            = create_tensor(tn(LLM_TENSOR_FC,              "scale"),  { 1 }, TENSOR_NOT_REQUIRED);
-    output_norm_enc = create_tensor(tn(LLM_TENSOR_ENC_OUTPUT_NORM, "weight"), { n_embd }, 0); // encoder hidden_norm (after fc)
+    const llm_tensor fc_tensor   = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_FC          : LLM_TENSOR_FC;
+    const llm_tensor norm_tensor = legacy_dspark ? LLM_TENSOR_DSPARK_LEGACY_HIDDEN_NORM : LLM_TENSOR_ENC_OUTPUT_NORM;
+    fc              = create_tensor(tn(fc_tensor,   "weight"), { n_embd_inp, n_embd }, 0);
+    fc_s            = create_tensor(tn(fc_tensor,   "scale"),  { 1 }, TENSOR_NOT_REQUIRED);
+    output_norm_enc = create_tensor(tn(norm_tensor, "weight"), { n_embd }, 0); // encoder hidden_norm (after fc)
     output_norm     = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM,    "weight"), { n_embd }, 0); // decoder final norm
 
     if (hparams.dsv4_hc_mult > 0) {
@@ -204,9 +236,6 @@ void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
         }
         return;
     }
-
-    // optional: reduced-vocab drafts ship their own, full-vocab drafts share the target's via ctx_other
-    output   = create_tensor(tn(LLM_TENSOR_OUTPUT,     "weight"), { n_embd, n_vocab_draft }, TENSOR_NOT_REQUIRED);
 
     for (int i = 0; i < n_layer; ++i) {
         auto & layer = layers[i];
@@ -288,8 +317,11 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
     const int64_t n_vocab = base->ne[0];
     const int64_t n_tok   = base->ne[1];
 
-    const auto it = model.gguf_kv.find("dflash.block_size");
-    GGML_ASSERT(it != model.gguf_kv.end() && "DSpark draft requires 'dflash.block_size' in GGUF metadata");
+    auto it = model.gguf_kv.find("dflash.block_size");
+    if (it == model.gguf_kv.end()) {
+        it = model.gguf_kv.find("dspark.dspark.block_size");
+    }
+    GGML_ASSERT(it != model.gguf_kv.end() && "DSpark draft requires block_size in GGUF metadata");
     const int64_t block_size = std::stoi(it->second);
     GGML_ASSERT(block_size > 0);
 

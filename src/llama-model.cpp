@@ -324,6 +324,7 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
         case LLM_ARCH_EAGLE3:
             return new llama_model_eagle3(params);
         case LLM_ARCH_DFLASH:
+        case LLM_ARCH_DSPARK:
             return new llama_model_dflash(params);
         case LLM_ARCH_MIMO2:
             return new llama_model_mimo2(params);
@@ -2294,6 +2295,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 }
             } break;
         case LLM_ARCH_DFLASH:
+        case LLM_ARCH_DSPARK:
             {
                 // DSV4 DSpark stages store a single MLA-style K per position (window = the draft ring)
                 if (hparams.dsv4_hc_mult > 0) {
@@ -2800,6 +2802,9 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
             // DSV4 DSpark drafters use DeepSeek-V4's normal RoPE; legacy DFlash backbones are NeoX
             return model->hparams.dsv4_hc_mult > 0 ? LLAMA_ROPE_TYPE_NORM : LLAMA_ROPE_TYPE_NEOX;
 
+        case LLM_ARCH_DSPARK:
+            return LLAMA_ROPE_TYPE_NEOX;
+
         case LLM_ARCH_QWEN2VL:
         case LLM_ARCH_PADDLEOCR:
             return LLAMA_ROPE_TYPE_MROPE;
@@ -2927,7 +2932,8 @@ bool llama_model_has_encoder(const llama_model * model) {
         case LLM_ARCH_T5:
         case LLM_ARCH_T5ENCODER:
         case LLM_ARCH_EAGLE3:
-        case LLM_ARCH_DFLASH:    return true;
+        case LLM_ARCH_DFLASH:
+        case LLM_ARCH_DSPARK:    return true;
         default:                 return false;
     }
 }
