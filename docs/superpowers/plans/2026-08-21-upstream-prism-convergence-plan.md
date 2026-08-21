@@ -27,15 +27,15 @@ recorded before conflicts are resolved.
 
 ## Milestone 1: full upstream merge
 
-- [ ] Merge pinned upstream commit
+- [x] Merge pinned upstream commit
       `9a286ac98d2cab74231bd3f1fc3f2b8bdf05422e` with a merge commit.
-- [ ] Resolve structural conflicts in favor of current upstream architecture.
-- [ ] Preserve the private README, notice, agent instructions, development docs,
+- [x] Resolve structural conflicts in favor of current upstream architecture.
+- [x] Preserve the private README, notice, agent instructions, development docs,
       and single Windows CUDA workflow.
-- [ ] Restore a clean configure with VS/v143 and CUDA `sm_120`.
-- [ ] Build CPU libraries and core tests before repairing optional backends.
-- [ ] Build CUDA libraries, `llama-cli`, and `llama-server`.
-- [ ] Run the upstream test suite available on Windows.
+- [x] Restore a clean configure with VS/v143 and CUDA `sm_120`.
+- [x] Build CPU libraries and core tests before repairing optional backends.
+- [x] Build CUDA libraries, `llama-cli`, and `llama-server`.
+- [x] Run the upstream test suite available on Windows (46/46 pass).
 
 Exit condition: complete upstream is present and the tree builds on the owner's
 Windows/CUDA platform, even if some fork-only features are temporarily disabled

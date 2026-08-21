@@ -155,11 +155,18 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_MXFP4_MOE     = 38, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_TQ3_1S        = 43, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_TQ4_1S        = 44, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
+
+        // Personal-fork private quantization file types. Keep these outside
+        // the upstream range for the same reason as the private ggml types.
+        LLAMA_FTYPE_MOSTLY_TQ3_1S        = 240, // WHT-rotated 3-bit weights
+        LLAMA_FTYPE_MOSTLY_TQ4_1S        = 241, // WHT-rotated 4-bit weights
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
+
+    // Get the model file type (quantization) as a string, e.g. "Q8_0" or "Q4_K - Medium"
+    LLAMA_API const char * llama_ftype_name(enum llama_ftype ftype);
 
     enum llama_rope_scaling_type {
         LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED = -1,
@@ -198,6 +205,23 @@ extern "C" {
         LLAMA_SPLIT_MODE_LAYER  = 1, // split layers and KV across GPUs
         LLAMA_SPLIT_MODE_ROW    = 2, // split layers and KV across GPUs, use tensor parallelism if supported
         LLAMA_SPLIT_MODE_TENSOR = 3,
+    };
+
+    enum llama_load_mode {
+        LLAMA_LOAD_MODE_AUTO       = -1, // auto-detect based on device capabilities
+        LLAMA_LOAD_MODE_NONE       =  0, // no special loading mode
+        LLAMA_LOAD_MODE_MMAP       =  1, // memory map the model
+        LLAMA_LOAD_MODE_MLOCK      =  2, // force system to keep model in RAM rather than swapping or compressing
+        LLAMA_LOAD_MODE_MMAP_MLOCK =  3, // mmap + force system to keep model in RAM rather than swapping or compressing
+        LLAMA_LOAD_MODE_DIRECT_IO  =  4, // use direct I/O if available
+    };
+
+    LLAMA_API const char * llama_load_mode_name(enum llama_load_mode load_mode);
+    LLAMA_API enum llama_load_mode llama_load_mode_from_str(const char * str);
+
+    enum llama_context_type {
+        LLAMA_CONTEXT_TYPE_DEFAULT = 0,
+        LLAMA_CONTEXT_TYPE_MTP     = 1,
     };
 
     // TODO: simplify (https://github.com/ggml-org/llama.cpp/pull/9294#pullrequestreview-2286561979)
@@ -294,6 +318,7 @@ extern "C" {
 
         int32_t n_gpu_layers; // number of layers to store in VRAM, a negative value means all layers
         enum llama_split_mode split_mode; // how to split the model across multiple GPUs
+        enum llama_load_mode  load_mode;  // how to load the model
 
         // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
         int32_t main_gpu;
@@ -312,18 +337,13 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
-        // if non-NULL, replace architecture from GGUF after read (e.g. load same file as qwen35_mtp for NextN draft)
-        const char * override_arch;
-
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
-        bool use_mmap;        // use mmap if possible
-        bool use_direct_io;   // use direct io, takes precedence over use_mmap when supported
-        bool use_mlock;       // force system to keep model in RAM
         bool check_tensors;   // validate model tensor data
         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
+        bool load_mtp;        // whether to load MTP layers
     };
 
     struct llama_sampler_seq_config {
@@ -334,14 +354,17 @@ extern "C" {
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
-        uint32_t n_ctx;             // text context, 0 = from model
-        uint32_t n_batch;           // logical maximum batch size that can be submitted to llama_decode
-        uint32_t n_ubatch;          // physical maximum batch size
-        uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
-        uint32_t n_rs_seq;          // number of recurrent-state snapshots per seq for rollback (0 = no rollback)
-        int32_t  n_threads;         // number of threads to use for generation
-        int32_t  n_threads_batch;   // number of threads to use for batch processing
+        uint32_t n_ctx;                 // text context, 0 = from model
+        uint32_t n_batch;               // logical maximum batch size that can be submitted to llama_decode
+        uint32_t n_ubatch;              // physical maximum batch size
+        uint32_t n_seq_max;             // max number of sequences (i.e. distinct states for recurrent models)
+        uint32_t n_rs_seq;              // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+        uint32_t n_outputs_max;         // max outputs in a ubatch (0 = n_batch)
+        uint32_t n_outputs_max_per_seq; // max outputs per sequence (0 = n_outputs_max)
+        int32_t  n_threads;             // number of threads to use for generation
+        int32_t  n_threads_batch;       // number of threads to use for batch processing
 
+        enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
         enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
         enum llama_pooling_type      pooling_type;      // whether to pool (sum) embedding results by sequence id
         enum llama_attention_type    attention_type;    // attention type to use for embeddings
@@ -380,14 +403,16 @@ extern "C" {
         bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
-        bool nextn_draft; // this context is the Qwen NextN draft side: build the NextN draft graph against the *target* llama_model
-                          // (no second mmap of the combined MTP GGUF). Default false. Set true only for the draft context.
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
         // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
         struct llama_sampler_seq_config * samplers;
         size_t                            n_samplers;
+
+        // a source/target/parent context
+        // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
+        struct llama_context * ctx_other;
     };
 
     struct llama_model_tensor_override {
@@ -436,6 +461,8 @@ extern "C" {
 
     // lora adapter
     struct llama_adapter_lora;
+
+    LLAMA_API const char * llama_version(void);
 
     // Helpers for getting default parameters
     // TODO: update API to start accepting pointers to params structs (https://github.com/ggml-org/llama.cpp/discussions/9172)
@@ -498,28 +525,6 @@ extern "C" {
                                  size_t    n_paths,
               struct llama_model_params    params);
 
-    // Gemma 4 MTP: load gemma4_assistant GGUF into a gemma4 target (call after llama_model_load_from_file, before llama_init_from_model).
-    // Returns 0 on success.
-    LLAMA_API int llama_model_load_mtp_from_file(
-            struct llama_model * model,
-            const char * path_mtp,
-            struct llama_model_params params);
-
-    LLAMA_API const struct llama_model * llama_model_get_mtp_assistant(const struct llama_model * model);
-
-    LLAMA_API bool llama_model_has_mtp_assistant(const struct llama_model * model);
-
-    // Backbone hidden size for MTP input (0 if no MTP assistant is loaded).
-    LLAMA_API uint32_t llama_model_mtp_n_embd_backbone(const struct llama_model * model);
-
-    // Qwen NextN: true when the target model was loaded from a combined *_MTP GGUF
-    // (i.e. hparams.nextn_predict_layers > 0) and its arch is one of {qwen35, qwen35moe}.
-    // Drives the shared-model NextN draft path (no second 22 GB mmap).
-    LLAMA_API bool llama_model_has_nextn_layer(const struct llama_model * model);
-
-    // Number of NextN predict layers stored in the target model (0 if none / not supported).
-    LLAMA_API uint32_t llama_model_n_nextn_predict_layers(const struct llama_model * model);
-
     LLAMA_API void llama_model_save_to_file(
             const struct llama_model * model,
                         const char * path_model);
@@ -541,27 +546,6 @@ extern "C" {
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);
 
-    enum llama_params_fit_status {
-        LLAMA_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
-        LLAMA_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
-        LLAMA_PARAMS_FIT_STATUS_ERROR   = 2, // a hard error occurred, e.g. because no model could be found at the specified path
-    };
-
-    // fits mparams and cparams to free device memory (assumes system memory is unlimited)
-    //   - returns true if the parameters could be successfully modified to fit device memory
-    //   - this function is NOT thread safe because it modifies the global llama logger state
-    //   - only parameters that have the same value as in llama_default_model_params are modified
-    //     with the exception of the context size which is modified if and only if equal to 0
-    LLAMA_API enum llama_params_fit_status llama_params_fit(
-                                   const char   * path_model,
-                    struct llama_model_params   * mparams,
-                    struct llama_context_params * cparams,
-                                          float * tensor_split,          // writable buffer for tensor split, needs at least llama_max_devices elements
-        struct llama_model_tensor_buft_override * tensor_buft_overrides, // writable buffer for overrides, needs at least llama_max_tensor_buft_overrides elements
-                                         size_t * margins,               // margins of memory to leave per device in bytes
-                                       uint32_t   n_ctx_min,             // minimum context size to set when trying to reduce memory use
-                            enum ggml_log_level   log_level);            // minimum log level to print during fitting, lower levels go to debug log
-
     LLAMA_API int64_t llama_time_us(void);
 
     LLAMA_API size_t llama_max_devices(void);
@@ -581,7 +565,7 @@ extern "C" {
     LLAMA_API uint32_t llama_n_batch    (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_ubatch   (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_seq_max  (const struct llama_context * ctx);
-    LLAMA_API uint32_t llama_n_rs_seq       (const struct llama_context * ctx);
+    LLAMA_API uint32_t llama_n_rs_seq   (const struct llama_context * ctx);
 
     DEPRECATED(LLAMA_API int32_t llama_n_ctx_train(const struct llama_model * model), "use llama_model_n_ctx_train instead");
     DEPRECATED(LLAMA_API int32_t llama_n_embd     (const struct llama_model * model), "use llama_model_n_embd instead");
@@ -597,14 +581,15 @@ extern "C" {
     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
 
-    LLAMA_API int32_t llama_model_n_ctx_train(const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd     (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd_inp (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd_out (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_ctx_train  (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd       (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd_inp   (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd_out   (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_layer      (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_swa        (const struct llama_model * model);
 
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
@@ -615,16 +600,6 @@ extern "C" {
 
     // Returns label of classifier output by index (<n_cls_out). Returns nullptr if no label provided
     LLAMA_API const char * llama_model_cls_label(const struct llama_model * model, uint32_t i);
-
-    // GGUF "general.architecture" string for the model (e.g. "gemma4", "gemma4_assistant")
-    LLAMA_API const char * llama_model_arch_str(const struct llama_model * model);
-
-    // Copy one token embedding row as f32. Supported for F32/F16 token_embd only. Returns row width or -1.
-    LLAMA_API int32_t llama_model_token_embd_row_f32(
-            const struct llama_model * model,
-            llama_token token,
-            float * out,
-            int32_t n_out);
 
     LLAMA_API enum llama_vocab_type llama_vocab_type(const struct llama_vocab * vocab);
 
@@ -653,6 +628,9 @@ extern "C" {
 
     // Get a string describing the model type
     LLAMA_API int32_t llama_model_desc(const struct llama_model * model, char * buf, size_t buf_size);
+
+    // Get the model file type (quantization), e.g. LLAMA_FTYPE_MOSTLY_Q8_0
+    LLAMA_API enum llama_ftype llama_model_ftype(const struct llama_model * model);
 
     // Returns the total size of all the tensors in the model in bytes
     LLAMA_API uint64_t llama_model_size(const struct llama_model * model);
@@ -912,6 +890,7 @@ extern "C" {
                const llama_token * tokens,
                           size_t   n_token_count);
 
+    // If tokens_out is NULL, only the token count is reported through n_token_count_out and no state is loaded
     LLAMA_API size_t llama_state_seq_load_file(
             struct llama_context * ctx,
                       const char * filepath,
@@ -920,11 +899,17 @@ extern "C" {
                           size_t   n_token_capacity,
                           size_t * n_token_count_out);
 
+#define LLAMA_STATE_SEQ_FLAGS_NONE 0
+
 // for backwards-compat
 #define LLAMA_STATE_SEQ_FLAGS_SWA_ONLY 1
 
 // work only with partial states, such as SWA KV cache or recurrent cache (e.g. Mamba)
 #define LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY 1
+
+// Keeps the tensor data on device buffers (i.e. not accessible in host memory, but faster save/load).
+// Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
+#define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
 
     typedef uint32_t llama_state_seq_flags;
 
@@ -1002,61 +987,6 @@ extern "C" {
             struct llama_context * ctx,
               struct llama_batch   batch);
 
-    // Gemma 4 MTP: run up to n_steps greedy assistant steps using target KV and last hidden state.
-    // h_prev must hold n_embd_backbone floats on input; overwritten with the last step's projected hidden on success.
-    // out_logits may be NULL or a row-major buffer of shape [n_steps, n_vocab].
-    // out_h_prev_last may be NULL; if set, receives the same final h as h_prev.
-    LLAMA_API int32_t llama_decode_mtp(
-            struct llama_context * ctx,
-            llama_seq_id seq_id,
-            llama_pos attn_pos,
-            llama_token last_token,
-            float * h_prev,
-            int32_t n_steps,
-            llama_token * out_drafts,
-            float * out_logits,
-            float * out_h_prev_last);
-
-    // Async MTP draft pipeline (see plan async-mtp-pipeline). Submits a draft request
-    // to a dedicated worker thread that runs the MTP graph on its own ggml_backend_sched.
-    // This lets the main thread proceed with target verify while MTP encodes in parallel.
-    //
-    // Contract:
-    //   - At most one in-flight request per context. Submitting a second _async without
-    //     calling _wait first returns -7 (and leaves the previous request in flight).
-    //   - h_prev must hold n_embd_backbone floats; the buffer is copied into the request,
-    //     so the caller may free or modify it after _async returns.
-    //   - The caller must guarantee that target KV positions ≤ attn_pos remain stable
-    //     until _wait returns. With the current append-only KV cache this is implicitly
-    //     true as long as no cache eviction is triggered between _async and _wait.
-    LLAMA_API int32_t llama_decode_mtp_async(
-            struct llama_context * ctx,
-            llama_seq_id  seq_id,
-            llama_pos     attn_pos,
-            llama_token   last_token,
-            const float * h_prev,
-            int32_t       n_steps);
-
-    // Block until the in-flight MTP request completes. Copies up to n_steps drafts into
-    // out_drafts and the last hidden state into out_h_prev_last (may be NULL).
-    LLAMA_API int32_t llama_decode_mtp_wait(
-            struct llama_context * ctx,
-            llama_token * out_drafts,
-            float       * out_h_prev_last);
-
-    // Qwen NextN (second-context draft): pair target `ctx` with a draft head context built from the same GGUF.
-    // Gemma 4 MTP APIs above are unchanged.
-    LLAMA_API void llama_set_nextn(
-            struct llama_context * ctx_target,
-            struct llama_context * ctx_nextn);
-
-    // Remove KV on both target and NextN draft contexts (draft uses seq_id 0).
-    LLAMA_API bool llama_context_nextn_seq_rm(
-            struct llama_context * ctx,
-            llama_seq_id           seq_id,
-            llama_pos              p0,
-            llama_pos              p1);
-
     // Set the number of threads used for decoding
     // n_threads is the number of threads used for generation (single token)
     // n_threads_batch is the number of threads used for prompt and batch processing (multiple tokens)
@@ -1078,7 +1008,11 @@ extern "C" {
 
     // Set whether the model is in warmup mode or not
     // If true, all model tensors are activated during llama_decode() to load and cache their weights.
-    LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup);
+    //
+    // note: using this can cause extra graph reallocations because it changes the graph topology with MoE models,
+    //       so it is generally not recommended to use in practice. will be removed in the future
+    DEPRECATED(LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup),
+            "user code should do warmup runs manually [TAG_LLAMA_GRAPH_NO_WARMUP]");
 
     // Set abort callback
     LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
@@ -1102,10 +1036,6 @@ extern "C" {
     // returns NULL for invalid ids.
     LLAMA_API float * llama_get_logits_ith(struct llama_context * ctx, int32_t i);
 
-    // Dense LM-head logits row for batch position i ([n_vocab], no backend sampling view).
-    // Prefer this for greedy speculative verification; llama_get_logits_ith() may return
-    // sparse / backend-sampled buffers that change argmax.
-    // Returns NULL if logits are unavailable for this index.
     // Get all output token embeddings.
     // when pooling_type == LLAMA_POOLING_TYPE_NONE or when using a generative model,
     // the embeddings for which llama_batch.logits[i] != 0 are stored contiguously
@@ -1134,6 +1064,9 @@ extern "C" {
     //
 
     // Get the backend sampled token for the ith token.
+    // With multiple outputs, sampler state advances when the token is accepted,
+    // not when it is read through this function.
+    // When accepting multiple outputs, accept a contiguous prefix in output order.
     // Returns LLAMA_TOKEN_NULL if no token was sampled.
     LLAMA_API llama_token llama_get_sampled_token_ith(struct llama_context * ctx, int32_t i);
 
@@ -1182,6 +1115,9 @@ extern "C" {
     LLAMA_API bool llama_vocab_get_add_bos(const struct llama_vocab * vocab);
     LLAMA_API bool llama_vocab_get_add_eos(const struct llama_vocab * vocab);
     LLAMA_API bool llama_vocab_get_add_sep(const struct llama_vocab * vocab);
+
+    // model-specific suppress tokens (gguf key: tokenizer.ggml.suppress_tokens)
+    LLAMA_API const llama_token * llama_vocab_get_suppress_tokens(const struct llama_vocab * vocab, int32_t * n_suppress_tokens);
 
     LLAMA_API llama_token llama_vocab_fim_pre(const struct llama_vocab * vocab);
     LLAMA_API llama_token llama_vocab_fim_suf(const struct llama_vocab * vocab);
@@ -1347,9 +1283,12 @@ extern "C" {
         // [EXPERIMENTAL]
         // backend sampling interface:
 
-        // return true if the backend supports all ops needed by the sampler
+        // return true if the backend supports all ops needed by the sampler and can handle up to n_outputs_max_per_seq outputs per sequence
         // note: call once per sampler
-        bool (*backend_init)(struct llama_sampler * smpl, ggml_backend_buffer_type_t buft);
+        bool (*backend_init)(
+                struct llama_sampler       * smpl,
+                ggml_backend_buffer_type_t   buft,
+                uint32_t                     n_outputs_max_per_seq);
 
         // call after .backend_apply()
         void (*backend_accept)(
@@ -1367,6 +1306,13 @@ extern "C" {
 
         // called before graph execution to set inputs for the current ubatch
         void (*backend_set_input)(struct llama_sampler * smpl);
+
+        // called before rebuilding a sampling graph to clear any internal sampler state
+        void (*backend_reset)(struct llama_sampler * smpl);
+
+        // copy mutable state from src into dst while keeping dst's references to the current sampling graph
+        // src and dst must have the same type and configuration
+        void (*copy_state)(const struct llama_sampler * src, struct llama_sampler * dst);
     };
 
     struct llama_sampler {
@@ -1387,6 +1333,7 @@ extern "C" {
     LLAMA_API void                   llama_sampler_apply (      struct llama_sampler * smpl, llama_token_data_array * cur_p);
     LLAMA_API void                   llama_sampler_reset (      struct llama_sampler * smpl);
     LLAMA_API struct llama_sampler * llama_sampler_clone (const struct llama_sampler * smpl);
+    LLAMA_API void                   llama_sampler_copy  (const struct llama_sampler * src, struct llama_sampler * dst);
     // important: do not free if the sampler has been added to a llama_sampler_chain (via llama_sampler_chain_add)
     LLAMA_API void                   llama_sampler_free  (      struct llama_sampler * smpl);
 
@@ -1501,19 +1448,19 @@ extern "C" {
 
     /// NOTE: Avoid using on the full vocabulary as searching for repeated tokens can become slow. For example, apply top-k or top-p sampling first.
     LLAMA_API struct llama_sampler * llama_sampler_init_penalties(
-                             int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty, -1 = context size)
-                               float   penalty_repeat,   // 1.0 = disabled
-                               float   penalty_freq,     // 0.0 = disabled
-                               float   penalty_present); // 0.0 = disabled
+                             int32_t   n_vocab,
+                             int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty)
+                               float   penalty_repeat,   // must be > 0.0, 1.0 = disabled
+                               float   penalty_freq,     // must be finite, 0.0 = disabled
+                               float   penalty_present); // must be finite, 0.0 = disabled
 
     ///  @details DRY sampler, designed by p-e-w, as described in: https://github.com/oobabooga/text-generation-webui/pull/5677, porting Koboldcpp implementation authored by pi6am: https://github.com/LostRuins/koboldcpp/pull/982
     LLAMA_API struct llama_sampler * llama_sampler_init_dry(
             const struct llama_vocab *  vocab,
-                             int32_t    n_ctx_train,
                                float    dry_multiplier,
                                float    dry_base,
                              int32_t    dry_allowed_length,
-                             int32_t    dry_penalty_last_n,
+                             int32_t    dry_penalty_last_n, // last n tokens to penalize (0 = disable penalty)
                           const char ** seq_breakers,
                               size_t    num_breakers);
 
@@ -1576,6 +1523,7 @@ extern "C" {
     LLAMA_API uint32_t llama_sampler_get_seed(const struct llama_sampler * smpl);
 
     /// @details Sample and accept a token from the idx-th output of the last evaluation
+    // For multiple outputs from one sampler, call this function in output order without gaps.
     //
     // Shorthand for:
     //    const auto * logits = llama_get_logits_ith(ctx, idx);
@@ -1645,9 +1593,6 @@ extern "C" {
     LLAMA_API struct llama_perf_sampler_data llama_perf_sampler      (const struct llama_sampler * chain);
     LLAMA_API void                           llama_perf_sampler_print(const struct llama_sampler * chain);
     LLAMA_API void                           llama_perf_sampler_reset(      struct llama_sampler * chain);
-
-    // print a breakdown of per-device memory use via LLAMA_LOG:
-    LLAMA_API void llama_memory_breakdown_print(const struct llama_context * ctx);
 
     //
     // training
