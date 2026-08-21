@@ -704,10 +704,14 @@ struct server_slot {
 // note: this is not a member of server_slot because we want to run it inside yield_to_queue
 //       slot is passed as const to avoid accidental modification of the slot state
 //       some pointers are allowed to be used, they are not used by to_json()
-static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
+static int process_mtmd_chunk(
+        const server_slot & slot,
+        const server_tokens & input_tokens,
+        mtmd::batch_ptr & mbatch,
+        size_t idx,
+        size_t & n_tokens_out) {
     GGML_ASSERT(slot.mctx);
     const auto & mctx = slot.mctx;
-    const auto & input_tokens = slot.task->tokens;
     const auto & chunk = input_tokens.find_chunk(idx);
     int32_t res = 0;
 
@@ -973,6 +977,11 @@ private:
         const bool is_resume = sleeping;
 
         params_base = params;
+        // common_init_from_params() disables context shifting when the memory
+        // implementation cannot K-shift in place. The server has a correct
+        // transactional reprefill path for that case, so preserve the user's
+        // requested policy across common initialization.
+        const bool user_requested_ctx_shift = params_base.ctx_shift;
         const auto output_limits = server_output_limits(params_base);
         params_base.n_outputs_max = output_limits.total;
         params_base.n_outputs_max_per_seq = output_limits.per_seq;
@@ -1115,6 +1124,11 @@ private:
 
         llama_init = common_init_from_params(params_base);
 
+        if (user_requested_ctx_shift && !params_base.ctx_shift) {
+            params_base.ctx_shift = true;
+            SRV_INF("%s\n", "ctx_shift re-enabled: the server will use transactional reprefill for non-shiftable KV");
+        }
+
         model_tgt = llama_init->model();
         ctx_tgt   = llama_init->context();
 
@@ -1183,11 +1197,6 @@ private:
             }
             SRV_INF("loaded multimodal model, '%s'\n", mmproj_path.c_str());
 
-            if (params_base.ctx_shift) {
-                params_base.ctx_shift = false;
-                SRV_WRN("%s\n", "ctx_shift is not supported by multimodal, it will be disabled");
-            }
-
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by multimodal, it will be disabled");
@@ -1195,11 +1204,6 @@ private:
         }
 
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
-            if (params_base.ctx_shift) {
-                params_base.ctx_shift = false;
-                SRV_WRN("%s\n", "ctx_shift is not supported by this context, it will be disabled");
-            }
-
             if (params_base.n_cache_reuse) {
                 params_base.n_cache_reuse = 0;
                 SRV_WRN("%s\n", "cache_reuse is not supported by this context, it will be disabled");
@@ -2859,12 +2863,6 @@ private:
                     return;
                 }
 
-                if (mctx) {
-                    // we should never reach this because params_base.ctx_shift is automatically disabled if mmproj is loaded
-                    // we don't support ctx_shift because an image chunk may contains multiple tokens
-                    GGML_ABORT("not supported by multimodal");
-                }
-
                 if (slot.task->is_parent() || slot.task->is_child()) {
                     send_error(slot, "context shift cannot be used for shared prompt", ERROR_TYPE_SERVER);
                     slot.release();
@@ -2886,25 +2884,129 @@ private:
                 // ref: https://github.com/ggml-org/llama.cpp/pull/24786
                 n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
 
-                SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
+                if (slot.prompt.tokens.has_media()) {
+                    n_keep = (int) slot.prompt.tokens.snap_past_media((size_t) n_keep);
+                    const int discard_end = (int) slot.prompt.tokens.snap_past_media((size_t) (n_keep + n_discard));
+                    n_discard = discard_end - n_keep;
 
-                slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
-                slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
+                    // Context shifting must retain at least one token after the
+                    // erased window, and may never split an image/audio chunk.
+                    if (n_discard <= 0 || n_keep + n_discard >= slot.prompt.n_tokens()) {
+                        send_error(slot, "context shift cannot select a complete media-aligned eviction window", ERROR_TYPE_SERVER);
+                        slot.release();
+                        return;
+                    }
+                }
 
-                // add generated tokens to cache
-                // ref: https://github.com/ggml-org/llama.cpp/pull/16818#discussion_r2473269481
-                {
-                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                const bool use_spec = slot.can_speculate();
+                const bool can_shift_tgt = llama_memory_can_shift(llama_get_memory(ctx_tgt));
+                const bool can_shift_dft = !use_spec || !ctx_dft || llama_memory_can_shift(llama_get_memory(ctx_dft));
+                const bool can_inplace = can_shift_tgt && can_shift_dft;
 
-                    llama_tokens new_tokens = slot.prompt.tokens.get_tokens(); // copy
-                    for (size_t i = n_keep + n_discard; i < new_tokens.size(); i++) {
-                        new_tokens[i - n_discard] = new_tokens[i];
+                SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d, mode = %s\n",
+                        n_keep, n_left, n_discard, can_inplace ? "shift" : "reprefill");
+
+                if (can_inplace) {
+                    if (use_spec) {
+                        slot.mem.seq_rm (slot.id, n_keep,             n_keep + n_discard);
+                        slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
+                    } else {
+                        llama_memory_t mem_tgt = llama_get_memory(ctx_tgt);
+                        if (!llama_memory_seq_rm(mem_tgt, slot.id, n_keep, n_keep + n_discard)) {
+                            send_error(slot, "context shift failed to remove the target sequence range", ERROR_TYPE_SERVER);
+                            slot.release();
+                            return;
+                        }
+                        llama_memory_seq_add(mem_tgt, slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
+                    }
+                    slot.prompt.tokens.erase_range((size_t) n_keep, (size_t) n_discard);
+                    slot.prompt.checkpoints.clear();
+                } else {
+                    // Rebuild the complete retained sequence. This is slower than
+                    // an in-place K-shift, but it is correct for TurboQuant K,
+                    // M-RoPE, hybrid recurrent memories, and retained media.
+                    // Full target/draft checkpoints make the operation
+                    // transactional if any text or media re-encode fails.
+                    server_prompt prompt_before = slot.prompt.clone();
+                    server_tokens retained = slot.prompt.tokens.clone();
+                    retained.erase_range((size_t) n_keep, (size_t) n_discard);
+
+                    common_prompt_checkpoint rollback;
+                    rollback.update_pos(
+                            slot.prompt.n_tokens(),
+                            llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
+                    rollback.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                    if (ctx_dft) {
+                        rollback.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
                     }
 
-                    new_tokens.resize(slot.prompt.tokens.size() - n_discard);
+                    std::vector<uint8_t> spec_state;
+                    if (use_spec) {
+                        common_speculative_get_state(spec.get(), slot.id, spec_state);
+                    }
+
+                    bool reprefill_ok = llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, -1, -1);
+                    if (ctx_dft) {
+                        reprefill_ok = llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1) && reprefill_ok;
+                    }
 
                     slot.prompt.clear();
-                    slot.prompt.tokens.insert(new_tokens);
+                    slot.mbatch.reset();
+
+                    size_t idx = 0;
+                    while (reprefill_ok && idx < retained.size()) {
+                        if (retained[idx] == LLAMA_TOKEN_NULL) {
+                            size_t n_tokens_out = 0;
+                            const int32_t res = process_mtmd_chunk(slot, retained, slot.mbatch, idx, n_tokens_out);
+                            if (res != 0) {
+                                reprefill_ok = false;
+                                break;
+                            }
+                            const auto & chunk = retained.find_chunk(idx);
+                            slot.prompt.tokens.push_back(chunk.get());
+                            idx += n_tokens_out;
+                            continue;
+                        }
+
+                        batch.clear();
+                        const size_t begin = idx;
+                        llama_pos pos = slot.prompt.tokens.pos_next();
+                        while (idx < retained.size() && retained[idx] != LLAMA_TOKEN_NULL && batch.size() < (int32_t) llama_n_batch(ctx_tgt)) {
+                            batch.add(slot.id, retained[idx], pos++, false, true);
+                            ++idx;
+                        }
+                        batch.slot_batched = &slot;
+                        batch.render();
+                        llama_batch view = batch.get_view(0, batch.size());
+
+                        if (llama_decode(ctx_tgt, view) != 0) {
+                            reprefill_ok = false;
+                            break;
+                        }
+                        if (use_spec && !common_speculative_process(spec.get(), view)) {
+                            reprefill_ok = false;
+                            break;
+                        }
+                        for (size_t i = begin; i < idx; ++i) {
+                            slot.prompt.tokens.push_back(retained[i]);
+                        }
+                    }
+                    batch.clear();
+
+                    if (!reprefill_ok) {
+                        rollback.load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                        if (ctx_dft) {
+                            rollback.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                        }
+                        if (use_spec) {
+                            common_speculative_set_state(spec.get(), slot.id, spec_state);
+                        }
+                        slot.prompt = std::move(prompt_before);
+                        send_error(slot, "context shift reprefill failed; the original context was restored", ERROR_TYPE_SERVER);
+                        slot.release();
+                        return;
+                    }
                 }
 
                 slot.truncated = true;
@@ -3433,7 +3535,7 @@ private:
                         size_t n_tokens_out = 0;
                         int32_t res = 0;
                         queue_tasks.yield_to_queue([&]() {
-                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out);
+                            res = process_mtmd_chunk(slot, input_tokens, slot.mbatch, cur_token_idx, n_tokens_out);
                         });
 
                         if (res != 0) {
@@ -3450,8 +3552,9 @@ private:
                         // add the mtmd chunk to cache
                         {
                             const auto & chunk = input_tokens.find_chunk(cur_token_idx);
-                            // the chunk is already in the KV cache at this point, so we don't need to keep its data around
-                            slot.prompt.tokens.push_back_placeholder(chunk.get());
+                            // Preserve the media payload so a non-shiftable KV can
+                            // transactionally rebuild the retained context later.
+                            slot.prompt.tokens.push_back(chunk.get());
                         }
 
                         has_mtmd = true;

@@ -480,7 +480,12 @@ struct messages_inp_normalizer {
     // if string=false and array=true, convert string to array
     // if both are true, do nothing
     json normalize(const json & messages) {
-        bool only_string = caps.supports_string_content && !caps.supports_typed_content;
+        // A template reporting support for neither form means capability
+        // detection failed. Prefer string content in that case: concatenation
+        // preserves the server's inline media marker, whereas an unrecognized
+        // typed `media_marker` part is commonly dropped by the template.
+        bool neither     = !caps.supports_string_content && !caps.supports_typed_content;
+        bool only_string = (caps.supports_string_content && !caps.supports_typed_content) || neither;
         bool only_typed  = !caps.supports_string_content && caps.supports_typed_content;
         if ((!only_string && !only_typed) || !messages.is_array()) {
             return messages;

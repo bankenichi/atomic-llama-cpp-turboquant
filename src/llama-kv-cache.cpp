@@ -1206,6 +1206,16 @@ bool llama_kv_cache::get_can_shift() const {
     if (hparams.n_pos_per_embd() > 1) {
         return false;
     }
+    // TurboQuant K cells are transformed and quantized. The generic K-shift
+    // graph cannot reapply RoPE in that representation, so shifting them in
+    // place would silently corrupt attention. The server can reprefill the
+    // retained text window instead.
+    if (!layers.empty() && layers[0].k) {
+        const ggml_type type = layers[0].k->type;
+        if (type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0) {
+            return false;
+        }
+    }
     return true;
 }
 

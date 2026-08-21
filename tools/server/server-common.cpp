@@ -628,6 +628,15 @@ llama_tokens server_tokens::get_text_tokens() const {
     return res;
 }
 
+llama_tokens server_tokens::replace_media_null_tokens(llama_token replacement) const {
+    llama_tokens result;
+    result.reserve(tokens.size());
+    for (llama_token token : tokens) {
+        result.push_back(token == LLAMA_TOKEN_NULL ? replacement : token);
+    }
+    return result;
+}
+
 void server_tokens::set_token(llama_pos pos, llama_token id) {
     GGML_ASSERT(!has_mtmd); // only allow this if mtmd is disabled
     tokens[pos] = id;
@@ -664,6 +673,58 @@ void server_tokens::keep_first(size_t n) {
         }
     }
     tokens.resize(n);
+}
+
+size_t server_tokens::snap_past_media(size_t pos) const {
+    if (!has_mtmd) {
+        return pos;
+    }
+
+    for (const auto & item : map_idx_to_media) {
+        const size_t start = item.first;
+        const size_t end   = start + mtmd_input_chunk_get_n_tokens(item.second.get());
+
+        // The beginning and end of a media chunk are both valid cut points.
+        // Only a cut strictly inside a chunk needs to move.
+        if (pos > start && pos < end) {
+            return end;
+        }
+    }
+    return pos;
+}
+
+void server_tokens::erase_range(size_t pos, size_t count) {
+    if (count == 0) {
+        return;
+    }
+    GGML_ASSERT(pos + count <= tokens.size());
+
+    if (has_mtmd) {
+        std::map<size_t, mtmd::input_chunk_ptr> updated;
+        for (auto & item : map_idx_to_media) {
+            const size_t start = item.first;
+            const size_t end   = start + mtmd_input_chunk_get_n_tokens(item.second.get());
+
+            // Reject partial media deletion. Callers normally snap both range
+            // boundaries first; keeping this check here makes the primitive safe
+            // for future call sites as well.
+            const bool overlaps = start < pos + count && end > pos;
+            const bool contained = start >= pos && end <= pos + count;
+            if (overlaps && !contained) {
+                throw std::runtime_error("Cannot erase a partial media chunk");
+            }
+
+            if (end <= pos) {
+                updated.emplace(start, std::move(item.second));
+            } else if (start >= pos + count) {
+                updated.emplace(start - count, std::move(item.second));
+            }
+            // Fully contained chunks are intentionally dropped.
+        }
+        map_idx_to_media = std::move(updated);
+    }
+
+    tokens.erase(tokens.begin() + pos, tokens.begin() + pos + count);
 }
 
 std::string server_tokens::detokenize(const llama_context * ctx, bool special) const {
