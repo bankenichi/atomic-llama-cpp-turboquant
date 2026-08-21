@@ -167,6 +167,17 @@ static void helper_write(FILE * file, const T & val) {
     GGML_ASSERT(fwrite(&val, 1, sizeof(val), file) == sizeof(val));
 }
 
+template <typename T>
+static void helper_append(std::vector<uint8_t> & data, const T & val) {
+    const uint8_t * bytes = reinterpret_cast<const uint8_t *>(&val);
+    data.insert(data.end(), bytes, bytes + sizeof(val));
+}
+
+static void helper_append(std::vector<uint8_t> & data, const void * src, size_t size) {
+    const uint8_t * bytes = static_cast<const uint8_t *>(src);
+    data.insert(data.end(), bytes, bytes + size);
+}
+
 static void helper_write(FILE * file, const void * data, const size_t nbytes) {
     GGML_ASSERT(fwrite(data, 1, nbytes, file) == nbytes);
 }
@@ -1422,6 +1433,95 @@ static void print_usage() {
     printf("  if no seed is unspecified then a random seed is used\n");
 }
 
+enum legacy_q2_layout {
+    LEGACY_Q2_GROUP64,
+    LEGACY_Q2_GROUP128,
+    LEGACY_Q2_MIXED,
+};
+
+static std::vector<uint8_t> make_legacy_q2_type42_gguf(legacy_q2_layout layout) {
+    constexpr uint32_t alignment = GGUF_DEFAULT_ALIGNMENT;
+    constexpr int64_t q2_ne = 2048; // padded g64/g128 sizes differ by exactly one alignment unit
+    constexpr int64_t tail_ne = 32;
+
+    const bool mixed = layout == LEGACY_Q2_MIXED;
+    const uint64_t n_tensors = mixed ? 3 : 2;
+    const uint64_t n_kv = 0;
+
+    std::vector<ggml_type> physical_types;
+    if (mixed) {
+        physical_types = { GGML_TYPE_Q2_0, GGML_TYPE_Q2_0_G128, GGML_TYPE_I8 };
+    } else {
+        physical_types = {
+            layout == LEGACY_Q2_GROUP128 ? GGML_TYPE_Q2_0_G128 : GGML_TYPE_Q2_0,
+            GGML_TYPE_I8,
+        };
+    }
+
+    std::vector<uint64_t> offsets(physical_types.size());
+    uint64_t data_size = 0;
+    for (size_t i = 0; i < physical_types.size(); ++i) {
+        offsets[i] = data_size;
+        const int64_t ne = i + 1 == physical_types.size() ? tail_ne : q2_ne;
+        data_size += GGML_PAD(ggml_row_size(physical_types[i], ne), alignment);
+    }
+
+    std::vector<uint8_t> data;
+    helper_append(data, GGUF_MAGIC, 4);
+    helper_append(data, uint32_t(GGUF_VERSION));
+    helper_append(data, n_tensors);
+    helper_append(data, n_kv);
+
+    for (size_t i = 0; i < physical_types.size(); ++i) {
+        const std::string name = "legacy_q2_" + std::to_string(i);
+        helper_append(data, uint64_t(name.size()));
+        helper_append(data, name.data(), name.size());
+        helper_append(data, uint32_t(1));
+        helper_append(data, i + 1 == physical_types.size() ? tail_ne : q2_ne);
+
+        // Reproduce the collision in the published files: all quantized tensors
+        // declare raw type 42 even when their bytes use the group-128 layout.
+        const int32_t raw_type = i + 1 == physical_types.size()
+            ? int32_t(GGML_TYPE_I8)
+            : int32_t(GGML_TYPE_Q2_0);
+        helper_append(data, raw_type);
+        helper_append(data, offsets[i]);
+    }
+
+    data.resize(GGML_PAD(data.size(), alignment), 0);
+    data.resize(data.size() + data_size, 0);
+    return data;
+}
+
+static std::pair<int, int> test_legacy_q2_type42_normalization() {
+    int npass = 0;
+    int ntest = 0;
+
+    const auto run = [&](legacy_q2_layout layout, ggml_type expected_type, bool expected_success) {
+        const std::vector<uint8_t> data = make_legacy_q2_type42_gguf(layout);
+        const gguf_init_params params = {
+            /*.no_alloc =*/ true,
+            /*.ctx      =*/ nullptr,
+        };
+        gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
+        const bool success = ctx != nullptr;
+        bool ok = success == expected_success;
+        if (ok && success) {
+            ok = gguf_get_tensor_type(ctx, 0) == expected_type;
+        }
+
+        printf("%s: layout=%d: %s\n", __func__, int(layout), ok ? "OK" : "FAIL");
+        npass += ok ? 1 : 0;
+        ntest += 1;
+        gguf_free(ctx);
+    };
+
+    run(LEGACY_Q2_GROUP64,   GGML_TYPE_Q2_0,      true);
+    run(LEGACY_Q2_GROUP128,  GGML_TYPE_Q2_0_G128, true);
+    run(LEGACY_Q2_MIXED,     GGML_TYPE_Q2_0,      false);
+    return std::make_pair(npass, ntest);
+}
+
 int main(int argc, char ** argv) {
     if (argc > 2) {
         print_usage();
@@ -1439,6 +1539,11 @@ int main(int argc, char ** argv) {
     int ntest = 0;
     {
         std::pair<int, int> result = test_handcrafted_file(seed);
+        npass += result.first;
+        ntest += result.second;
+    }
+    {
+        std::pair<int, int> result = test_legacy_q2_type42_normalization();
         npass += result.first;
         ntest += result.second;
     }

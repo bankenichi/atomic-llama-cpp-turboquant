@@ -365,6 +365,10 @@ struct gguf_reader {
         return data_offset;
     }
 
+    uint64_t remaining() const {
+        return nbytes_remain;
+    }
+
     bool seek(uint64_t absolute_offset) const {
         const uint64_t end_offset = uint64_t(data_offset) + nbytes_remain;
         if (absolute_offset > end_offset) {
@@ -417,6 +421,145 @@ private:
     mutable uint64_t data_offset = 0;
     mutable uint64_t nbytes_remain = 0;
 };
+
+static bool gguf_tensor_layout_size(
+        const ggml_tensor & tensor,
+        ggml_type type,
+        size_t alignment,
+        size_t & size,
+        size_t & padded_size) {
+    const int64_t block_size = ggml_blck_size(type);
+    const size_t type_size = ggml_type_size(type);
+
+    if (block_size <= 0 || type_size == 0 || tensor.ne[0] % block_size != 0) {
+        return false;
+    }
+
+    const uint64_t n_blocks = uint64_t(ggml_nelements(&tensor) / block_size);
+    if (n_blocks > SIZE_MAX / type_size) {
+        return false;
+    }
+
+    size = size_t(n_blocks) * type_size;
+    if (size > SIZE_MAX - (alignment - 1)) {
+        return false;
+    }
+    padded_size = GGML_PAD(size, alignment);
+    return true;
+}
+
+static bool gguf_set_tensor_layout(gguf_tensor_info & info, ggml_type type) {
+    const int64_t block_size = ggml_blck_size(type);
+    const size_t type_size = ggml_type_size(type);
+
+    if (block_size <= 0 || type_size == 0 || info.t.ne[0] % block_size != 0) {
+        return false;
+    }
+
+    info.t.type = type;
+    info.t.nb[0] = type_size;
+    info.t.nb[1] = info.t.nb[0] * (info.t.ne[0] / block_size);
+    for (int j = 2; j < GGML_MAX_DIMS; ++j) {
+        info.t.nb[j] = info.t.nb[j - 1] * info.t.ne[j - 1];
+    }
+    return true;
+}
+
+// Prism's original ternary GGUFs were published while raw tensor type 42 meant
+// group-128 Q2_0 in that fork. Upstream later assigned 42 to its incompatible
+// group-64 Q2_0. Modern files use our collision-free type 142, but the published
+// Bonsai artifacts must remain loadable without rewriting multi-gigabyte files.
+//
+// Infer the legacy encoding from the physical tensor spans recorded in the GGUF
+// offset table. A single decisive tensor selects the layout for every raw type-42
+// tensor in the shard; contradictory evidence is rejected instead of silently
+// interpreting part of a model with the wrong block format.
+static bool gguf_normalize_legacy_q2_0_type42(gguf_context & ctx, uint64_t data_bytes_available) {
+    enum class physical_layout {
+        unknown,
+        group64,
+        group128,
+    } layout = physical_layout::unknown;
+
+    size_t n_type42 = 0;
+    for (size_t i = 0; i < ctx.info.size(); ++i) {
+        const gguf_tensor_info & info = ctx.info[i];
+        if (info.t.type != GGML_TYPE_Q2_0) {
+            continue;
+        }
+        ++n_type42;
+
+        size_t size_g64 = 0;
+        size_t padded_g64 = 0;
+        size_t size_g128 = 0;
+        size_t padded_g128 = 0;
+        const bool valid_g64 = gguf_tensor_layout_size(
+                info.t, GGML_TYPE_Q2_0, ctx.alignment, size_g64, padded_g64);
+        const bool valid_g128 = gguf_tensor_layout_size(
+                info.t, GGML_TYPE_Q2_0_G128, ctx.alignment, size_g128, padded_g128);
+
+        if (!valid_g64) {
+            GGML_LOG_ERROR("%s: tensor '%s' is not valid group-64 Q2_0\n", __func__, info.t.name);
+            return false;
+        }
+
+        uint64_t physical_span = 0;
+        bool span_known = false;
+        if (i + 1 < ctx.info.size()) {
+            if (ctx.info[i + 1].offset < info.offset) {
+                continue; // the normal contiguous-offset validation reports this below
+            }
+            physical_span = ctx.info[i + 1].offset - info.offset;
+            span_known = true;
+        } else if (data_bytes_available >= info.offset) {
+            physical_span = data_bytes_available - info.offset;
+            span_known = true;
+        }
+
+        if (!span_known) {
+            continue;
+        }
+
+        const bool matches_g64 = physical_span == padded_g64;
+        const bool matches_g128 = valid_g128 && physical_span == padded_g128;
+        physical_layout observed = physical_layout::unknown;
+        if (matches_g64 != matches_g128) {
+            observed = matches_g128 ? physical_layout::group128 : physical_layout::group64;
+        }
+
+        if (observed == physical_layout::unknown) {
+            continue;
+        }
+        if (layout != physical_layout::unknown && layout != observed) {
+            GGML_LOG_ERROR(
+                    "%s: raw tensor type 42 has mixed group-64 and legacy group-128 physical layouts\n",
+                    __func__);
+            return false;
+        }
+        layout = observed;
+    }
+
+    if (n_type42 == 0 || layout != physical_layout::group128) {
+        return true;
+    }
+
+    for (gguf_tensor_info & info : ctx.info) {
+        if (info.t.type != GGML_TYPE_Q2_0) {
+            continue;
+        }
+        if (!gguf_set_tensor_layout(info, GGML_TYPE_Q2_0_G128)) {
+            GGML_LOG_ERROR(
+                    "%s: legacy group-128 tensor '%s' has an incompatible shape\n",
+                    __func__, info.t.name);
+            return false;
+        }
+    }
+
+    GGML_LOG_WARN(
+            "%s: normalized %zu legacy raw type-42 tensor(s) from Prism group-128 Q2_0 to type 142\n",
+            __func__, n_type42);
+    return true;
+}
 
 struct gguf_context * gguf_init_empty(void) {
     return new gguf_context;
@@ -770,6 +913,12 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
 
     // store the current file offset - this is where the data section starts
     ctx->offset = gr.tell();
+
+    if (!gguf_normalize_legacy_q2_0_type42(*ctx, gr.remaining())) {
+        GGML_LOG_ERROR("%s: failed to normalize legacy tensor layouts\n", __func__);
+        gguf_free(ctx);
+        return nullptr;
+    }
 
     // compute the total size of the data section, taking into account the alignment
     {
