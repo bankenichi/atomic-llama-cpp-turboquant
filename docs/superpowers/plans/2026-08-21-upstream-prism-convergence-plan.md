@@ -15,12 +15,12 @@ Design contract:
 
 ## Milestone 0: baseline and inventory
 
-- [ ] Record the current compiler, CUDA, CMake generator, and v143 toolset.
-- [ ] Build the pre-merge Release tree and run available tests.
-- [ ] Record current model launchers and locally available model fixtures.
-- [ ] Create `docs/development/upstream-convergence-ledger.md` from the local
+- [x] Record the current compiler, CUDA, CMake generator, and v143 toolset.
+- [x] Build the pre-merge Release tree and run available tests.
+- [x] Record current model launchers and locally available model fixtures.
+- [x] Create `docs/development/upstream-convergence-ledger.md` from the local
       feature inventory.
-- [ ] Record the exact upstream and Prism commit tips.
+- [x] Record the exact upstream and Prism commit tips.
 
 Exit condition: the current fork can be restored and its observable behavior is
 recorded before conflicts are resolved.
