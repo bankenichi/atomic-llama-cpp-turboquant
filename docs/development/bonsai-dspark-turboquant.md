@@ -121,7 +121,13 @@ Gemma/Qwen `--n-cpu-moe` tuning rules to it.
 | Exact base + DSpark + mmproj, image inference | Pass |
 | Combined server, forced vision-aware Turbo context shifts | Pass, reprefill used |
 | Text after media in the same server | Pass, drafting resumes |
-| Generic Windows test suite | 46/46 pass at the upstream checkpoint; rerun for final delivery |
+| Generic Windows test suite | 47/47 pass after convergence with upstream `d775b8967` |
+| Quantization suite under AddressSanitizer | Pass; private types included, no memory errors |
+
+The final combined acceptance run produced the expected Apollo 11 image answer,
+the expected `42` text answer, two transactional reprefill shifts, and 13/16
+accepted DSpark draft tokens. The generic suite was run serially so the exhaustive
+CUDA backend matrix did not contend with another test process.
 
 Metal and Vulkan code is restored for source parity but cannot be compiled on the
 owner's Windows/CUDA-only toolchain (no Apple Metal compiler or GLSL compiler is
