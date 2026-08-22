@@ -1,0 +1,3 @@
+[submodule "tools/llama-config-ui"]
+	path = tools/llama-config-ui
+	url = https://github.com/bankenichi/llama-config-ui

@@ -138,7 +138,7 @@ the selected binary, files, draft mode, cache types, and DSpark limits:
 .\run-gemma.ps1 -Ternary
 .\run-gemma.ps1 -Ternary -NoSpec        # target-only, vision retained
 .\run-gemma.ps1 -Ternary -NoVision      # DSpark text-only
-.\run-gemma.ps1 -Ternary -FullKV        # full-f16 diagnostic caches
+.\run-gemma.ps1 -Ternary -FullKV        # full-f16 target diagnostic; Q8_0 draft
 .\run-gemma.ps1 -Ternary -Preview       # resolve and validate without launching
 ```
 
@@ -152,14 +152,17 @@ build\bin\Release\llama-server.exe `
   --spec-draft-n-max 4 `
   --mmproj 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-mmproj-Q8_0.gguf' `
   -ngl 999 -ngld 999 `
-  -ctk f16 -ctv turbo2 -ctkd f16 -ctvd f16 -fa on `
+  -ctk turbo4 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 -fa on `
   --ctx-size 32768 --parallel 1 --context-shift `
   --reasoning off
 ```
 
-`turbo2` uses its adaptive policy by default. Boundary V-cache layers promote to
-Q8_0 while K remains f16; the restricted CUDA build contains and tests this mixed
-576x512 attention path. Set `TURBO_LAYER_ADAPTIVE=0` only for a controlled A/B test.
+The normal Ternary target cache is `turbo4` K / `turbo3` V. DSpark uses lossless
+`q8_0` K/V rather than spending memory on f16 draft KV. `-Ternary -FullKV` raises
+only the target cache to f16 for controlled diagnostics; the draft cache remains
+q8_0/q8_0. The CUDA suite still retains the separate F16 K / Q8_0 V 576x512
+operator test because that layout is part of the fork's adaptive/compatibility
+surface even though it is no longer the owner launcher's default.
 
 Published Prism files that stored Q2_0-G128 under raw GGUF type 42 are detected by
 physical tensor spans and normalized to this fork's collision-free runtime type
@@ -224,6 +227,14 @@ structured JSON. Profiles live in
 while explicit settings from the wrapper or UI take precedence. The launcher probes
 the selected executable and fails preflight when a required Atomic option or
 speculative type is absent instead of silently dropping it.
+
+The configuration UI is versioned as the
+[`tools/llama-config-ui`](tools/llama-config-ui) submodule. Initialize it with
+`git submodule update --init --recursive`, then run `python server.py` from that
+directory. It provides typed Gemma/Qwen/Ternary topology, binary capability
+probing, validation, managed start/stop, readiness, logs, metrics, redacted
+diagnostics, and non-destructive import of the older Program Files profiles. See
+[`docs/development/launcher-config-ui.md`](docs/development/launcher-config-ui.md).
 
 ## Confirm the server before connecting a frontend
 
@@ -322,6 +333,8 @@ for preserving attribution.
   — vision/KV shifting and reprefill.
 - [`docs/development/performance-features.md`](docs/development/performance-features.md)
   — MoE prefetch, mmap pinning, and TurboQuant runtime controls.
+- [`docs/development/launcher-config-ui.md`](docs/development/launcher-config-ui.md)
+  — canonical launcher, owner wrapper, UI control plane, migration, and validation.
 
 For general `llama.cpp` usage, model conversion, and backend documentation, use
 the [upstream documentation](https://github.com/ggml-org/llama.cpp/tree/master/docs).

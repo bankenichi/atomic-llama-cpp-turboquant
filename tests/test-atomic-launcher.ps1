@@ -64,6 +64,10 @@ Assert-Equal $qwenPlan.environment.GGML_SCHED_PREFETCH_EXPERTS '1' 'Qwen enables
 $ternary = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset standard
 Assert-Equal $ternary.spec_type 'draft-dspark' 'Ternary standard uses DSpark'
 Assert-Equal $ternary.spec_draft_n_max 4 'Ternary standard uses the tested four-token draft'
+Assert-Equal $ternary.cache_type_k 'turbo4' 'Ternary target K cache uses the owner standard'
+Assert-Equal $ternary.cache_type_v 'turbo3' 'Ternary target V cache uses the owner standard'
+Assert-Equal $ternary.draft_cache_type_k 'q8_0' 'Ternary draft K cache uses lossless Q8_0'
+Assert-Equal $ternary.draft_cache_type_v 'q8_0' 'Ternary draft V cache uses lossless Q8_0'
 Assert-True $ternary.vision_enabled 'Ternary standard keeps vision enabled'
 Assert-True $ternary.model.EndsWith('Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf') 'Ternary target path matches the local artifact'
 Assert-True $ternary.draft_model.EndsWith('Ternary-Bonsai-27B-dspark-Q4_1.gguf') 'Ternary draft path matches the local artifact'
@@ -72,14 +76,18 @@ Assert-True $ternary.mmproj.EndsWith('Ternary-Bonsai-27B-mmproj-Q8_0.gguf') 'Ter
 $ternaryPlan = New-AtomicLaunchPlan -Configuration $ternary -SkipFileValidation
 Assert-True $ternaryPlan.validation.valid 'Standard Ternary plan validates'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-type') 'draft-dspark' 'Ternary command emits DSpark'
+Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--cache-type-k') 'turbo4' 'Ternary command emits target K cache'
+Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--cache-type-v') 'turbo3' 'Ternary command emits target V cache'
+Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-draft-type-k') 'q8_0' 'Ternary command emits lossless draft K cache'
+Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-draft-type-v') 'q8_0' 'Ternary command emits lossless draft V cache'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--model-draft') $ternary.draft_model 'Ternary command emits the sidecar path literally'
 Assert-True (-not ($ternaryPlan.arguments -contains '--spec-draft-ctx-size')) 'Launcher never emits the stale draft-context flag'
 
 $ternaryFull = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset full-f16
 Assert-Equal $ternaryFull.cache_type_k 'f16' 'Full-f16 Ternary target K cache'
 Assert-Equal $ternaryFull.cache_type_v 'f16' 'Full-f16 Ternary target V cache'
-Assert-Equal $ternaryFull.draft_cache_type_k 'f16' 'Full-f16 Ternary draft K cache'
-Assert-Equal $ternaryFull.draft_cache_type_v 'f16' 'Full-f16 Ternary draft V cache'
+Assert-Equal $ternaryFull.draft_cache_type_k 'q8_0' 'Target-f16 diagnostic keeps lossless Q8_0 draft K cache'
+Assert-Equal $ternaryFull.draft_cache_type_v 'q8_0' 'Target-f16 diagnostic keeps lossless Q8_0 draft V cache'
 
 $gemma = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack gemma26 -Preset mtp
 Assert-Equal $gemma.spec_type 'draft-mtp' 'Gemma MTP uses the current CLI type'

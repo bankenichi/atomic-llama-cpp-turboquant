@@ -44,6 +44,7 @@ local.
 | DSpark | Upstream llama.cpp DSpark work (including [PR #25173](https://github.com/ggml-org/llama.cpp/pull/25173) and [PR #26275](https://github.com/ggml-org/llama.cpp/pull/26275)) plus PrismML-Eng's block-diffusion/GIDD extensions | Legacy Prism metadata namespace, strict parsing, context/vocabulary bounds, vision-aware server lifecycle |
 | Expert upload overlap and mmap host pinning | thecodacus branch linked above | Windows `GetSystemInfo` page handling and this fork's env-gated integration |
 | Gemma 4 vision, context-shift, prompt-cache, and coexistence fixes | This personal fork, built on upstream mtmd and AtomicBot model work | Owner-specific integration and regression coverage |
+| Launcher configuration UI | [`bankenichi/llama-config-ui`](https://github.com/bankenichi/llama-config-ui), retained as a separately versioned submodule with its original Git history | Typed Atomic launcher adapter, feature validation, managed lifecycle, profiles, diagnostics, and tests |
 
 Named contributor summary (non-exhaustive; Git history remains authoritative):
 
@@ -96,6 +97,8 @@ Important provenance-oriented records include:
   — ternary/DSpark/TurboQuant implementation details;
 - [`docs/development/thecodacus-prefetch-mmap-port.md`](docs/development/thecodacus-prefetch-mmap-port.md)
   — source comparison and port rationale;
+- [`docs/development/launcher-config-ui.md`](docs/development/launcher-config-ui.md)
+  — canonical launcher contract, UI integration, profile migration, and tests;
 - [`docs/development/pre-convergence-baseline-2026-08-21.md`](docs/development/pre-convergence-baseline-2026-08-21.md)
   and [`docs/development/upstream-convergence-ledger.md`](docs/development/upstream-convergence-ledger.md)
   — pre-merge baseline and capability decisions.
