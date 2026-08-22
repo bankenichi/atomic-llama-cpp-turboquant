@@ -309,7 +309,7 @@ function Test-AtomicConfiguration {
         $warnings.Add('TurboQuant K cannot shift in place; Atomic will use its transactional reprefill path.')
     }
     if ([bool] $Configuration.vision_enabled -and [bool] $Configuration.spec_enabled) {
-        $warnings.Add('Text turns draft normally; real media turns use the safe target path and rebuild draft state before later text drafting.')
+        $warnings.Add('Real media uses the selected speculative implementation policy. The target still verifies every proposal, and the configured draft depth remains in effect.')
     }
     if ($Configuration.cache_type_k -eq 'f16' -and $Configuration.cache_type_v -eq 'f16') {
         $warnings.Add('Full-f16 target KV consumes substantially more VRAM than the tuned cache profile.')
@@ -372,8 +372,14 @@ function New-AtomicLaunchPlan {
     Add-AtomicArgument $arguments '--cache-type-k' $Configuration.cache_type_k
     Add-AtomicArgument $arguments '--cache-type-v' $Configuration.cache_type_v
 
-    if ([bool] $Configuration.mlock) { Add-AtomicArgument $arguments '--mlock' -Switch }
-    if ([bool] $Configuration.no_mmap -and -not [bool] $Configuration.pin_host) { Add-AtomicArgument $arguments '--no-mmap' -Switch }
+    # The deprecated switches both overwrite one load_mode field, so emitting
+    # `--mlock --no-mmap` silently ended in mode `none`. Express the intended
+    # non-mmap locked load atomically through the modern option.
+    if ([bool] $Configuration.mlock) {
+        Add-AtomicArgument $arguments '--load-mode' 'mlock'
+    } elseif ([bool] $Configuration.no_mmap -and -not [bool] $Configuration.pin_host) {
+        Add-AtomicArgument $arguments '--load-mode' 'none'
+    }
     if ([bool] $Configuration.jinja) { Add-AtomicArgument $arguments '--jinja' -Switch }
     Add-AtomicArgument $arguments '--flash-attn' $Configuration.flash_attention
     Add-AtomicArgument $arguments $(if ([bool] $Configuration.context_shift) { '--context-shift' } else { '--no-context-shift' }) -Switch

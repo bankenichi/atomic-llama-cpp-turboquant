@@ -112,8 +112,8 @@
         "mmproj_file": "mmproj.gguf",
         "cache_type_k": "turbo4",
         "cache_type_v": "turbo3",
-        "draft_cache_type_k": "f16",
-        "draft_cache_type_v": "f16",
+        "draft_cache_type_k": "q8_0",
+        "draft_cache_type_v": "q8_0",
         "n_cpu_moe": 28,
         "has_moe": true,
         "prefetch_experts": true,
@@ -134,8 +134,8 @@
         "full-f16": {
           "cache_type_k": "f16",
           "cache_type_v": "f16",
-          "draft_cache_type_k": "f16",
-          "draft_cache_type_v": "f16"
+          "draft_cache_type_k": "q8_0",
+          "draft_cache_type_v": "q8_0"
         }
       }
     },

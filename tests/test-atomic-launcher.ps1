@@ -48,8 +48,8 @@ Assert-Contains @($catalog.stacks.PSObject.Properties.Name) 'ternary' 'Ternary s
 $qwen = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack qwen -Preset standard
 Assert-Equal $qwen.cache_type_k 'turbo4' 'Qwen target K cache uses the owner standard'
 Assert-Equal $qwen.cache_type_v 'turbo3' 'Qwen target V cache uses the owner standard'
-Assert-Equal $qwen.draft_cache_type_k 'f16' 'Qwen draft K cache is explicit'
-Assert-Equal $qwen.draft_cache_type_v 'f16' 'Qwen draft V cache is explicit'
+Assert-Equal $qwen.draft_cache_type_k 'q8_0' 'Qwen draft K cache uses lossless Q8_0'
+Assert-Equal $qwen.draft_cache_type_v 'q8_0' 'Qwen draft V cache uses lossless Q8_0'
 Assert-Equal $qwen.spec_type 'draft-mtp' 'Qwen uses the current embedded NextN CLI type'
 Assert-True ([string]::IsNullOrWhiteSpace([string] $qwen.draft_model)) 'Qwen does not map a second GGUF'
 
@@ -57,8 +57,11 @@ $qwenPlan = New-AtomicLaunchPlan -Configuration $qwen -SkipFileValidation
 Assert-True $qwenPlan.validation.valid 'Standard Qwen plan validates'
 Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--cache-type-k') 'turbo4' 'Qwen command emits target K cache'
 Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--cache-type-v') 'turbo3' 'Qwen command emits target V cache'
-Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--spec-draft-type-k') 'f16' 'Qwen command emits draft K cache'
-Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--spec-draft-type-v') 'f16' 'Qwen command emits draft V cache'
+Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--spec-draft-type-k') 'q8_0' 'Qwen command emits lossless draft K cache'
+Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--spec-draft-type-v') 'q8_0' 'Qwen command emits lossless draft V cache'
+Assert-Equal (Get-ArgumentValue $qwenPlan.arguments '--load-mode') 'mlock' 'Launcher emits the unambiguous modern load mode'
+Assert-True (-not ($qwenPlan.arguments -contains '--mlock')) 'Launcher omits deprecated --mlock'
+Assert-True (-not ($qwenPlan.arguments -contains '--no-mmap')) 'Launcher omits deprecated --no-mmap'
 Assert-Equal $qwenPlan.environment.GGML_SCHED_PREFETCH_EXPERTS '1' 'Qwen enables expert prefetch'
 
 $ternary = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset standard
