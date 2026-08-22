@@ -2560,6 +2560,24 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                float   kq_scale,
                  int   il) const {
     const bool v_trans = v->nb[1] > v->nb[2];
+    const auto is_turbo = [](ggml_type type) {
+        return type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+    };
+    const bool k_is_turbo = is_turbo(k->type);
+    const bool v_is_turbo = is_turbo(v->type);
+    // Dynamic InnerQ activation is intentionally disabled. Changing the K scale
+    // after calibration would make already-populated and new KV rows incompatible.
+    ggml_tensor * turbo_innerq_scale = nullptr;
+
+    if (k_is_turbo) {
+        if (q->ne[0] % 128 != 0) {
+            q = ggml_pad(ctx0, q, GGML_PAD(q->ne[0], 128) - q->ne[0], 0, 0, 0);
+        }
+        if (!ggml_is_contiguous(q)) {
+            q = ggml_cont(ctx0, q);
+        }
+        q = ggml_turbo_wht(ctx0, q, 0, 128, turbo_innerq_scale);
+    }
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -2595,6 +2613,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+
+        if (v_is_turbo) {
+            if (!ggml_is_contiguous(cur)) {
+                cur = ggml_cont(ctx0, cur);
+            }
+            cur = ggml_turbo_wht(ctx0, cur, 1, 128, turbo_innerq_scale);
+
+            const int64_t head_v = hparams.n_embd_head_v(il);
+            if (cur->ne[0] > head_v) {
+                cur = ggml_view_4d(ctx0, cur, head_v, cur->ne[1], cur->ne[2], cur->ne[3],
+                        cur->nb[1], cur->nb[2], cur->nb[3], 0);
+                cur = ggml_cont(ctx0, cur);
+            }
+        }
 
         if (v_mla) {
 #if 0
@@ -2661,6 +2693,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
         cb(kqv, "kqv", il);
+
+        if (v_is_turbo) {
+            if (!ggml_is_contiguous(kqv)) {
+                kqv = ggml_cont(ctx0, kqv);
+            }
+            kqv = ggml_turbo_wht(ctx0, kqv, 1, 128, turbo_innerq_scale);
+
+            const int64_t head_v = hparams.n_embd_head_v(il);
+            if (kqv->ne[0] > head_v) {
+                kqv = ggml_view_4d(ctx0, kqv, head_v, kqv->ne[1], kqv->ne[2], kqv->ne[3],
+                        kqv->nb[1], kqv->nb[2], kqv->nb[3], 0);
+                kqv = ggml_cont(ctx0, kqv);
+            }
+        }
 
         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA
         if (v_mla) {

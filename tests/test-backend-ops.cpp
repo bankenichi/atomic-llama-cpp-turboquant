@@ -2441,7 +2441,8 @@ struct test_set_rows : public test_case {
     double max_nmse_err() override {
         if (type_dst == GGML_TYPE_Q2_0 || type_dst == GGML_TYPE_Q4_0 || type_dst == GGML_TYPE_Q4_1 ||
             type_dst == GGML_TYPE_IQ4_NL ||
-            type_dst == GGML_TYPE_Q5_0 || type_dst == GGML_TYPE_Q5_1 || type_dst == GGML_TYPE_Q8_0) {
+            type_dst == GGML_TYPE_Q5_0 || type_dst == GGML_TYPE_Q5_1 || type_dst == GGML_TYPE_Q8_0 ||
+            type_dst == GGML_TYPE_TURBO2_0 || type_dst == GGML_TYPE_TURBO3_0 || type_dst == GGML_TYPE_TURBO4_0) {
             // estimate what the max nmse error would be if one quantized value is
             // off by one. The test values are distributed in [-1,1], so it'll be
             // roughly (2.0 / 2^bits)^2, divided by the mean square value of the reference,
@@ -2473,6 +2474,28 @@ struct test_set_rows : public test_case {
             return std::max(test_case::max_nmse_err(backend), 2e-7);
         }
         return test_case::max_nmse_err(backend);
+    }
+};
+
+// GGML_OP_TURBO_WHT
+struct test_turbo_wht : public test_case {
+    const std::array<int64_t, 4> ne;
+    const int direction;
+    const int group_size;
+
+    test_turbo_wht(std::array<int64_t, 4> ne, int direction, int group_size)
+        : ne(ne), direction(direction), group_size(group_size) {}
+
+    std::string vars() override {
+        return VARS_TO_STR3(ne, direction, group_size);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]);
+        ggml_set_name(src, "src");
+        ggml_tensor * out = ggml_turbo_wht(ctx, src, direction, group_size, nullptr);
+        ggml_set_name(out, "out");
+        return out;
     }
 };
 
@@ -8430,6 +8453,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0, GGML_TYPE_I32, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
+    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_TURBO2_0, GGML_TYPE_I64, { 1024, 8, 1, 1 }, { 1, 1 }, 8, false));
+    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_TURBO3_0, GGML_TYPE_I64, { 1024, 8, 1, 1 }, { 1, 1 }, 8, false));
+    test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_TURBO4_0, GGML_TYPE_I64, { 1024, 8, 1, 1 }, { 1, 1 }, 8, false));
+    test_cases.emplace_back(new test_turbo_wht({  96, 15, 4, 1 }, 0,  32));
+    test_cases.emplace_back(new test_turbo_wht({  96, 15, 4, 1 }, 1,  32));
+    test_cases.emplace_back(new test_turbo_wht({ 192, 18, 6, 1 }, 0,  64));
+    test_cases.emplace_back(new test_turbo_wht({ 192, 18, 6, 1 }, 1,  64));
+    test_cases.emplace_back(new test_turbo_wht({ 256, 24, 8, 1 }, 0, 128));
+    test_cases.emplace_back(new test_turbo_wht({ 256, 24, 8, 1 }, 1, 128));
     for (ggml_type src_type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
         for (ggml_type type : all_types) {
             for (int b : {1, 7}) {

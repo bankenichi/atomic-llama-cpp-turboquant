@@ -1376,6 +1376,14 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 ggml_is_contiguous_rows(op->src[1]) &&
                 ggml_is_contiguous_rows(op->src[2]) &&
                 ggml_is_contiguous_rows(op->src[3]);
+        case GGML_OP_TURBO_WHT:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[1] == nullptr &&
+                ggml_get_op_params_i32(op, 1) == 128 &&
+                ggml_nelements(op->src[0]) % 128 == 0 &&
+                ggml_is_contiguous(op->src[0]) &&
+                ggml_is_contiguous(op);
         case GGML_OP_SSM_SCAN:
             return has_simdgroup_reduction;
         case GGML_OP_SSM_CONV:

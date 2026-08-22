@@ -589,6 +589,7 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_TURBO_WHT,
 
         GGML_OP_UNARY,
 
@@ -2663,6 +2664,17 @@ extern "C" {
             struct ggml_tensor  * residual,
             struct ggml_tensor  * post,
             struct ggml_tensor  * comb);
+
+    // TurboQuant Walsh-Hadamard transform used to rotate queries into the
+    // quantized KV basis and rotate attention values back out of it.
+    // direction: 0 = forward, 1 = inverse
+    // group_size: 0 = auto-select 128 or 64 from a->ne[0]
+    GGML_API struct ggml_tensor * ggml_turbo_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   direction,
+            int                   group_size,
+            struct ggml_tensor  * scale);
 
     // custom operators
 

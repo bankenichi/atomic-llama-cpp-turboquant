@@ -10972,6 +10972,84 @@ void ggml_compute_forward_gated_delta_net(
     }
 }
 
+// ggml_compute_forward_turbo_wht
+
+// These deterministic sign vectors are shared with the CUDA and Metal kernels.
+static const float turbo_wht_s1[128] = {-1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1};
+static const float turbo_wht_s2[128] = {1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1};
+
+static void ggml_compute_forward_turbo_wht_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src          = dst->src[0];
+    const ggml_tensor * scale_tensor = dst->src[1];
+    const float * src_data = (const float *) src->data;
+    float * dst_data       = (float *) dst->data;
+    const float * scale_inv = scale_tensor ? (const float *) scale_tensor->data : NULL;
+
+    int direction;
+    int group_size;
+    memcpy(&direction,  dst->op_params + 0,           sizeof(direction));
+    memcpy(&group_size, dst->op_params + sizeof(int), sizeof(group_size));
+
+    const int64_t head_dim        = src->ne[0];
+    const int64_t n_heads         = ggml_nelements(src) / head_dim;
+    const int64_t groups_per_head = head_dim / group_size;
+    const int64_t n_groups        = groups_per_head * n_heads;
+    const float inv_sqrt          = 1.0f / sqrtf((float) group_size);
+
+    const int64_t grp_start = (n_groups * params->ith) / params->nth;
+    const int64_t grp_end   = (n_groups * (params->ith + 1)) / params->nth;
+
+    const float * s_first  = direction == 0 ? turbo_wht_s1 : turbo_wht_s2;
+    const float * s_second = direction == 0 ? turbo_wht_s2 : turbo_wht_s1;
+
+    for (int64_t g = grp_start; g < grp_end; ++g) {
+        const int64_t head_idx    = g / groups_per_head;
+        const int64_t grp_in_head = g % groups_per_head;
+        const int64_t base        = head_idx * head_dim + grp_in_head * group_size;
+        const float * in          = src_data + base;
+        float x[128];
+
+        for (int i = 0; i < group_size; ++i) {
+            const float scaled = direction == 0 && scale_inv != NULL ? in[i] * scale_inv[i] : in[i];
+            x[i] = scaled * s_first[i];
+        }
+
+        for (int h = 1; h < group_size; h *= 2) {
+            for (int i = 0; i < group_size; i += 2*h) {
+                for (int j = i; j < i + h; ++j) {
+                    const float a = x[j];
+                    const float b = x[j + h];
+                    x[j]     = a + b;
+                    x[j + h] = a - b;
+                }
+            }
+        }
+
+        float * out = dst_data + base;
+        for (int i = 0; i < group_size; ++i) {
+            float value = x[i] * inv_sqrt * s_second[i];
+            if (direction == 1 && scale_inv != NULL) {
+                value *= scale_inv[i];
+            }
+            out[i] = value;
+        }
+    }
+}
+
+void ggml_compute_forward_turbo_wht(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            ggml_compute_forward_turbo_wht_f32(params, dst);
+            break;
+        default:
+            GGML_ABORT("unsupported TurboQuant WHT input type");
+    }
+}
+
 
 // ggml_compute_forward_dsv4_hc_comb
 

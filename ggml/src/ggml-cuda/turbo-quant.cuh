@@ -156,33 +156,20 @@ static int  innerq_target_tokens = 0;
 static float innerq_strength     = 0.5f;
 static bool  innerq_initialized  = false;
 
-// Host: read TURBO_INNERQ env, start calibration if enabled
+// InnerQ cannot be enabled safely while the KV cache is populated incrementally:
+// calibration would change the K scaling after earlier rows were already stored,
+// leaving one cache with two incompatible representations. Keep the old kernels
+// inert until activation is coupled to an atomic full-cache requantization.
 static void turbo_innerq_init(void) {
     if (innerq_initialized) return;
     innerq_initialized = true;
 
     const char * env = getenv("TURBO_INNERQ");
-    if (!env || atoi(env) <= 0) {
-        innerq_enabled = 0;
-        return;
+    if (env && atoi(env) > 0) {
+        GGML_LOG_WARN("%s: TURBO_INNERQ is disabled: dynamic calibration would invalidate existing KV rows\n",
+                      __func__);
     }
-    innerq_target_tokens = atoi(env);
-    innerq_enabled = 1;  // calibrating
-
-    const char * env_str = getenv("TURBO_INNERQ_STRENGTH");
-    if (env_str) innerq_strength = atof(env_str);
-    if (innerq_strength <= 0.0f || innerq_strength > 1.0f) innerq_strength = 0.5f;
-
-    // Zero accumulators and set calibrating flag on device
-    float zeros[INNERQ_MAX_CHANNELS] = {0};
-    int zero = 0, one = 1;
-    CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_sq_accum, zeros, sizeof(zeros)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_count, &zero, sizeof(int)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_active, &zero, sizeof(int)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_calibrating, &one, sizeof(int)));
-
-    GGML_LOG_INFO("%s: InnerQ calibration started (target=%d tokens, strength=%.2f)\n",
-                   __func__, innerq_target_tokens, innerq_strength);
+    innerq_enabled = 0;
 }
 
 // Host: finalize calibration — compute scales, upload, activate

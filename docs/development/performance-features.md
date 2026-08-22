@@ -15,6 +15,8 @@ Related docs: [`mtp-cpumoe-vision-fixes.md`](mtp-cpumoe-vision-fixes.md) (MTP/vi
 | Expert-upload prefetch | env `GGML_SCHED_PREFETCH_EXPERTS=1` (value = slot count, default 3) | `--n-cpu-moe` (op_offload); keep `--no-mmap` | Overlaps expert H2D with compute during prefill. Biggest prefill win. |
 | mmap host-pin | env `GGML_CUDA_REGISTER_HOST=1` | mmap on (i.e. **omit** `--no-mmap`) | Pins mmap CPU weights. Alternative to `--no-mmap`; **negates prefetch** — don't combine. |
 | NextN sync multi-step | default on | `--spec-type nextn --model-draft <gguf>`, `--draft-max N` | Drafts N tokens/round. Async single-step is opt-in via `LLAMA_NEXTN_ASYNC=1`. |
+| TurboQuant KV | `-ctk turbo4 -ctv turbo2 -fa on` | Flash Attention; CUDA recommended | Pads non-128 head widths internally; Turbo K context shifts use transactional reprefill. |
+| Bonsai DSpark | `--spec-type draft-dspark -md <sidecar> --spec-draft-n-max 4` | Matching Bonsai target/sidecar | Text drafts with mmproj loaded; real-media turns fall back safely. |
 
 ---
 

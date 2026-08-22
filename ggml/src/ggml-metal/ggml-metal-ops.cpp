@@ -351,6 +351,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_gated_delta_net(ctx, idx);
             } break;
+        case GGML_OP_TURBO_WHT:
+            {
+                n_fuse = ggml_metal_op_turbo_wht(ctx, idx);
+            } break;
         case GGML_OP_SOLVE_TRI:
             {
                 n_fuse = ggml_metal_op_solve_tri(ctx, idx);
@@ -1886,6 +1890,33 @@ int ggml_metal_op_gated_delta_net(ggml_metal_op_t ctx, int idx) {
     const int nsg = pipeline.nsg;
 
     ggml_metal_encoder_dispatch_threadgroups(enc, op->src[2]->ne[0]/nsg, op->src[2]->ne[1], op->src[2]->ne[3], 32, nsg, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    GGML_ASSERT(op->op == GGML_OP_TURBO_WHT);
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[1] == nullptr);
+    GGML_ASSERT(ggml_get_op_params_i32(op, 1) == 128);
+
+    ggml_metal_kargs_turbo_wht args = {
+        /*.n_elements =*/ ggml_nelements(op->src[0]),
+        /*.direction  =*/ ggml_get_op_params_i32(op, 0),
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(ctx->lib);
+
+    ggml_metal_encoder_set_pipeline(ctx->enc, pipeline);
+    ggml_metal_encoder_set_bytes   (ctx->enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op),         2);
+    ggml_metal_encoder_set_threadgroup_memory_size(ctx->enc, pipeline.smem, 0);
+    ggml_metal_encoder_dispatch_threadgroups(
+            ctx->enc, args.n_elements/128, 1, 1, 128, 1, 1);
 
     return 1;
 }

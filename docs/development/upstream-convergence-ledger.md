@@ -13,8 +13,8 @@ named upstream feature has not yet been proven equivalent.
 | Paired NextN context shift | `llama_context_nextn_seq_rm`, server shift paths | Not yet proven upstream-equivalent | Reimplement centrally if upstream lacks it | Target/draft positions equal after remove, shift, cache relocation, reprefill |
 | Vision-aware context shift | server token/media helpers and KV cache | Not found under the local helper names upstream | Reimplement on modern server APIs | Image boundaries never split; shiftable and reprefill paths are transactional |
 | Template `media_marker` fallback | `common/chat.cpp` | Upstream recognizes `media_marker`; exact neither-capability fallback not yet proven | Pending focused diff/test | One image produces one marker with the failing Gemma 4 coder template |
-| TurboQuant KV | `ggml` CPU/CUDA/Metal/Vulkan/HIP and llama graph/cache | No upstream TurboQuant types | Reimplement/forward-port completely | Existing quant tests, FA paths, KV serialization, context tests |
-| TQ3/TQ4 weights | `ggml` CPU/CUDA/Metal/Vulkan and quantizer | No upstream TQ3/TQ4 types | Reimplement with non-colliding IDs and legacy GGUF compatibility | Existing files load; CPU/CUDA numerical and MoE tests pass |
+| TurboQuant KV | `ggml` CPU/CUDA/Metal/Vulkan/HIP and llama graph/cache | No upstream TurboQuant types | Reimplemented on the current graph/cache APIs; CUDA exact-model and vision-shift acceptance pass | CUDA SET_ROWS 3/3; WHT 6/6; exact combined server pass |
+| TQ3/TQ4 weights | `ggml` CPU/CUDA/Metal/Vulkan and quantizer | No upstream TQ3/TQ4 types | Private type registration and CPU fallback traits restored with non-colliding runtime IDs | Existing private types enumerate, quantize, and build; optimized paths remain backend-specific |
 | Expert prefetch overlap | `ggml/src/ggml-backend.cpp` | Environment gate not present upstream | Reimplement on current scheduler | Default unchanged; opt-in overlaps transfers and preserves output |
 | mmap host registration | `src/llama-mmap.*`, model loader | Upstream exposes the CUDA registration proc but does not wire retained mmap ranges into it | Augment: restored loader wiring and Windows page-aligned registration | Windows mmap pages register/unregister only when opted in |
 | MSVC ASM_MASM fix | `ggml/CMakeLists.txt` | Current upstream build configures successfully with VS/v143 and CUDA | Existing fork guard retained; clean configure/build passed | Clean Windows CUDA configure/build |
@@ -29,11 +29,11 @@ named upstream feature has not yet been proven equivalent.
 | Capability | Source | Status | Required proof |
 |---|---|---|---|
 | Upstream group-64 `Q2_0` type 42 | upstream | Merged unchanged; CUDA backend operation matrix passes | Standard upstream Q2 model loads and backend tests pass |
-| Modern Prism group-128 type 142 | Prism modern branch | Pending integration | CPU/CUDA quant, `get_rows`, MMVQ, MMQ pass |
-| Legacy Bonsai group-128 type 42 | exact HF files / Prism legacy branch | Pending physical-layout preflight | Exact target and drafter load without rewrite; ambiguous files reject |
-| Modern upstream DSpark | upstream | Merged; fixed the sidecar loader to open the computed draft path instead of the base model path | Upstream DSpark tests and sample model continue to work |
-| Legacy Bonsai `dspark` | Prism legacy branch | Pending port | Exact Q4_1 sidecar drafts accepted tokens with greedy parity |
-| Bonsai vision | exact HF target and mmproj | Pending model integration | Text/image/text session and context-shift gates pass |
+| Modern Prism group-128 type 142 | Prism modern branch | Integrated across CPU/CUDA quantization and matrix paths | CUDA backend tests and exact group-128 target inference pass |
+| Legacy Bonsai group-128 type 42 | exact HF files / Prism legacy branch | Physical-layout preflight normalizes coherent legacy files before allocation | Exact target loads without rewrite; ambiguous/mixed encodings reject |
+| Modern upstream DSpark | upstream | Merged; sidecar loader opens the computed draft path | Current DFlash/DSpark tests and loader behavior retained |
+| Legacy Bonsai `dspark` | Prism legacy branch | Compatibility adapter integrated through the current DSpark runtime | Exact Q4_1 sidecar loads and produces accepted drafts |
+| Bonsai vision | exact HF target and mmproj | Integrated without weakening real-media speculative gates | Exact text/image/text and forced Turbo context-shift session pass |
 
 Rows are updated in the same commits that make or verify the associated decision.
 
@@ -43,6 +43,8 @@ The pinned upstream merge was configured in a fresh `build-convergence` tree wit
 VS/v143, CUDA, and `sm_120a`. The complete tool suite, including `llama-server`
 and all `mtmd` adapters, built successfully. CTest passed 46/46 tests; notably,
 the full CUDA backend-operation matrix and refreshed quant-type selection tests
-both pass, improving on the pre-convergence baseline. Real-model and
-owner-specific behavior remains gated by the focused proofs above rather than by
-the generic build/test checkpoint.
+both pass, improving on the pre-convergence baseline. The exact Bonsai base,
+DSpark sidecar, and mmproj subsequently passed focused target-only, speculative,
+vision, and transactional context-shift proofs. See
+[`bonsai-dspark-turboquant.md`](bonsai-dspark-turboquant.md) for artifacts,
+hashes, commands, and the final acceptance matrix.

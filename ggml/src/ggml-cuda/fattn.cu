@@ -324,6 +324,29 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    // TurboQuant KV combinations are always compiled. Mixed precision is used
+    // by the layer-adaptive cache policy and by asymmetric K/V configurations.
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO3_0)
+
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO3_0)
+
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0,     GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,      GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO2_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO4_0)
+
     GGML_ABORT("fatal error");
 }
 
@@ -349,6 +372,9 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
+        case GGML_TYPE_TURBO2_0:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
             return true;
         default:
             return false;
@@ -428,6 +454,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             }
             break;
         case 576:
+        case 640:
             if (V->ne[0] != 512) {
                 return BEST_FATTN_KERNEL_NONE;
             }
@@ -441,7 +468,14 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
     if (K->type != V->type) {
-        return BEST_FATTN_KERNEL_NONE;
+        const auto is_turbo = [](ggml_type type) {
+            return type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+        };
+        const bool turbo_pair = is_turbo(K->type) && (is_turbo(V->type) || V->type == GGML_TYPE_Q8_0);
+        const bool turbo_value = is_turbo(V->type) && (K->type == GGML_TYPE_Q8_0 || K->type == GGML_TYPE_F16);
+        if (!turbo_pair && !turbo_value) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
@@ -456,6 +490,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
+
+    // The modern MMA implementation cannot instantiate the narrow-column variants required by
+    // TurboQuant's padded 576 -> 640 K rows. A dedicated 640x512 TILE kernel is compiled instead.
+    if (Q->ne[0] == 640) {
+        return BEST_FATTN_KERNEL_TILE;
+    }
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {

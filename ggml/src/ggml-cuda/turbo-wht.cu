@@ -57,8 +57,9 @@ static __global__ void k_turbo_wht_f32(const float * __restrict__ src,
     } else if (group_size == 64) {
         x[t] *= (direction == 0) ? TURBO_WHT_SIGNS1_64[t] : TURBO_WHT_SIGNS2_64[t];
     } else {
-        // group_size == 32: TQ weight signs (same for forward and inverse)
-        x[t] *= TQ_WEIGHT_SIGNS[t];
+        // group_size == 32: use the first 32 entries of the canonical
+        // TurboQuant sign vectors, matching the CPU implementation.
+        x[t] *= (direction == 0) ? TURBO_WHT_SIGNS1[t] : TURBO_WHT_SIGNS2[t];
     }
     __syncthreads();
 
@@ -91,8 +92,8 @@ static __global__ void k_turbo_wht_f32(const float * __restrict__ src,
         result = x[t] * inv_sqrt *
             ((direction == 0) ? TURBO_WHT_SIGNS2_64[t] : TURBO_WHT_SIGNS1_64[t]);
     } else {
-        // group_size == 32: normalize only (signs already applied before butterfly)
-        result = x[t] * inv_sqrt;
+        result = x[t] * inv_sqrt *
+            ((direction == 0) ? TURBO_WHT_SIGNS2[t] : TURBO_WHT_SIGNS1[t]);
     }
 
     // InnerQ inverse: apply scale_inv AFTER WHT+signs (for V un-rotation)

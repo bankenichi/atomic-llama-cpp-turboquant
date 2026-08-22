@@ -2996,6 +2996,33 @@ template [[host_name("kernel_gated_delta_net_f32_2")]] kernel kernel_gated_delta
 template [[host_name("kernel_gated_delta_net_f32_4")]] kernel kernel_gated_delta_net_t kernel_gated_delta_net_impl<float4, 4>;
 #endif
 
+kernel void kernel_turbo_wht(
+        constant ggml_metal_kargs_turbo_wht & args,
+        device const float * src [[buffer(1)]],
+        device       float * dst [[buffer(2)]],
+        threadgroup  float * x   [[threadgroup(0)]],
+        uint group_idx [[threadgroup_position_in_grid]],
+        uint tid       [[thread_index_in_threadgroup]]) {
+    const uint64_t index = uint64_t(group_idx)*128 + tid;
+
+    const float sign_first = args.direction == 0 ? turbo_wht_signs1[tid] : turbo_wht_signs2[tid];
+    x[tid] = src[index]*sign_first;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint h = 1; h < 128; h *= 2) {
+        if ((tid % (2*h)) < h) {
+            const float a = x[tid];
+            const float b = x[tid + h];
+            x[tid]     = a + b;
+            x[tid + h] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float sign_second = args.direction == 0 ? turbo_wht_signs2[tid] : turbo_wht_signs1[tid];
+    dst[index] = x[tid]*0.08838834764831845f*sign_second;
+}
+
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
 constant short FC_solve_tri_k   [[function_constant(FC_SOLVE_TRI + 2)]];

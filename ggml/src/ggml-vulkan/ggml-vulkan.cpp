@@ -1042,6 +1042,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_topk_f32[num_topk_pipelines];
     vk_pipeline pipeline_sum_rows_f32;
     vk_pipeline pipeline_fwht_f32[4];
+    vk_pipeline pipeline_turbo_wht;
     vk_pipeline pipeline_cumsum_f32;
     vk_pipeline pipeline_cumsum_small_f32;
     vk_pipeline pipeline_cumsum_multipass1_f32;
@@ -5776,6 +5777,10 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
     }
 
+    ggml_vk_create_pipeline(device, device->pipeline_turbo_wht,
+            "turbo_wht", turbo_wht_len, turbo_wht_data, "main",
+            2, 3*sizeof(uint32_t), {128, 1, 1}, {}, 1);
+
     const uint32_t cumsum_elem_per_thread = (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_INTEL) ? 2 : 4;
     ggml_vk_create_pipeline(device, device->pipeline_cumsum_f32,       "cumsum_f32", cumsum_f32_len, cumsum_f32_data, "main", 2, sizeof(vk_op_sum_rows_push_constants), {1, 1, 1}, { 256, device->subgroup_size, cumsum_elem_per_thread }, 1, true, true, device->subgroup_size);
     ggml_vk_create_pipeline(device, device->pipeline_cumsum_small_f32, "cumsum_f32", cumsum_f32_len, cumsum_f32_data, "main", 2, sizeof(vk_op_sum_rows_push_constants), {1, 1, 1}, { 128, device->subgroup_size, 1 }, 1, true, true, device->subgroup_size);
@@ -9999,6 +10004,42 @@ static void ggml_vk_fwht(ggml_backend_vk_context * ctx, vk_context& subctx, cons
     init_pushconst_tensor_offsets(ctx, pc, src, nullptr, nullptr, nullptr, dst);
 
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc, { workgroups_x, 1, 1 });
+}
+
+static void ggml_vk_turbo_wht(
+        ggml_backend_vk_context * ctx,
+        vk_context & subctx,
+        const ggml_tensor * src,
+        ggml_tensor * dst) {
+    const uint32_t direction  = (uint32_t) ggml_get_op_params_i32(dst, 0);
+    const uint32_t group_size = (uint32_t) ggml_get_op_params_i32(dst, 1);
+    GGML_ASSERT(group_size == 128);
+
+    struct turbo_wht_push_constants {
+        uint32_t ne;
+        uint32_t direction;
+        uint32_t group_size;
+    } pc = {
+        (uint32_t) ggml_nelements(src), direction, group_size,
+    };
+
+    vk_pipeline pipeline = ctx->device->pipeline_turbo_wht;
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+
+    const vk_subbuffer src_buf = ggml_vk_tensor_subbuffer(ctx, src, true);
+    const vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
+
+    const uint32_t n_groups = pc.ne/group_size;
+    std::array<uint32_t, 3> elements;
+    if (n_groups > 262144) {
+        elements = { 512*group_size, 512, CEIL_DIV(n_groups, 262144) };
+    } else if (n_groups > 512) {
+        elements = { 512*group_size, CEIL_DIV(n_groups, 512), 1 };
+    } else {
+        elements = { pc.ne, 1, 1 };
+    }
+
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc, elements);
 }
 
 static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
@@ -15535,6 +15576,10 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         ggml_vk_set_rows(ctx, compute_ctx, src0, src1, node);
 
         break;
+    case GGML_OP_TURBO_WHT:
+        ggml_vk_turbo_wht(ctx, compute_ctx, src0, node);
+
+        break;
     case GGML_OP_SILU_BACK:
         ggml_vk_silu_back(ctx, compute_ctx, src0, src1, node);
 
@@ -18448,6 +18493,14 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_PAD:
         case GGML_OP_ROLL:
             return op->src[0]->type == GGML_TYPE_F32;
+        case GGML_OP_TURBO_WHT:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[1] == nullptr &&
+                ggml_get_op_params_i32(op, 1) == 128 &&
+                ggml_nelements(op->src[0]) % 128 == 0 &&
+                ggml_is_contiguous(op->src[0]) &&
+                ggml_is_contiguous(op);
         case GGML_OP_DIAG_MASK_INF:
             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_SOFT_MAX:
