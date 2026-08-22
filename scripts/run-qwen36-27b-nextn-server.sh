@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Qwen3.6 27B target + NextN draft (second load, same GGUF, override_arch) on llama-server.
+# Qwen3.6 target + embedded NextN on llama-server. The runtime reopens the same
+# GGUF with its draft architecture; no --model-draft path is required.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,6 +42,8 @@ if [[ "$SPEC" == "nextn" ]]; then
 fi
 
 PARALLEL="${PARALLEL:-1}"
+N_CPU_MOE="${N_CPU_MOE:-0}"
+MMPROJ="${MMPROJ:-}"
 
 ARGS=(
   -m "$MAIN"
@@ -54,11 +57,21 @@ ARGS=(
   -fa "$FA"
   --host "$HOST"
   --port "$PORT"
-  --parallel "$PARALLEL"
   -np "$PARALLEL"
   --cont-batching
   --context-shift
 )
+
+if [[ "$N_CPU_MOE" != "0" ]]; then
+  ARGS+=(--n-cpu-moe "$N_CPU_MOE")
+fi
+if [[ -n "$MMPROJ" ]]; then
+  if [[ ! -f "$MMPROJ" ]]; then
+    echo "error: mmproj not found: ${MMPROJ}" >&2
+    exit 1
+  fi
+  ARGS+=(--mmproj "$MMPROJ")
+fi
 
 if [[ "$SPEC" == "nextn" ]]; then
   ARGS+=(
@@ -76,6 +89,6 @@ fi
 [[ "$LOG_PREFIX"      != "0" ]] && ARGS+=(--log-prefix)
 [[ "$NO_WARMUP"       != "0" ]] && ARGS+=(--no-warmup)
 
-echo "info: SPEC=${SPEC} CTX=${CTX} NGL=${NGL} FA=${FA} CTK=${CTK} CTKD=${CTKD}" >&2
+echo "info: SPEC=${SPEC} CTX=${CTX} NGL=${NGL} N_CPU_MOE=${N_CPU_MOE} FA=${FA} CTK=${CTK}/${CTV} CTKD=${CTKD}/${CTVD}" >&2
 echo "info: MAIN=${MAIN}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

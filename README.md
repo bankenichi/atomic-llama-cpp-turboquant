@@ -117,12 +117,12 @@ Do not mix a projector or drafter from a differently converted target merely
 because the architecture name matches: vocabulary, hidden-state taps, mask token,
 and projector geometry must agree with the target.
 
-Before launching, keep the three paths explicit:
+The owner deployment stores the matching files under `C:\Program Files\llamacpp`:
 
 ```powershell
-$BonsaiModel = 'C:\models\Ternary-Bonsai-27B-Q2_0.gguf'
-$BonsaiDraft = 'C:\models\Ternary-Bonsai-27B-dspark-Q4_1.gguf'
-$BonsaiMmproj = 'C:\models\Ternary-Bonsai-27B-mmproj-Q8_0.gguf'
+$BonsaiModel = 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf'
+$BonsaiDraft = 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-dspark-Q4_1.gguf'
+$BonsaiMmproj = 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-mmproj-Q8_0.gguf'
 ```
 
 The exact published filenames can change independently of this source tree, so
@@ -131,15 +131,28 @@ list before copying paths into a launcher.
 
 ## Run Ternary Bonsai + DSpark + vision
 
+The ignored owner wrapper delegates to the tracked canonical launcher and validates
+the selected binary, files, draft mode, cache types, and DSpark limits:
+
+```powershell
+.\run-gemma.ps1 -Ternary
+.\run-gemma.ps1 -Ternary -NoSpec        # target-only, vision retained
+.\run-gemma.ps1 -Ternary -NoVision      # DSpark text-only
+.\run-gemma.ps1 -Ternary -FullKV        # full-f16 diagnostic caches
+.\run-gemma.ps1 -Ternary -Preview       # resolve and validate without launching
+```
+
+The equivalent native command is:
+
 ```powershell
 build\bin\Release\llama-server.exe `
-  -m C:\models\Ternary-Bonsai-27B-Q2_0.gguf `
-  --model-draft C:\models\Ternary-Bonsai-27B-dspark-Q4_1.gguf `
+  -m 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf' `
+  --model-draft 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-dspark-Q4_1.gguf' `
   --spec-type draft-dspark `
   --spec-draft-n-max 4 `
-  --mmproj C:\models\Ternary-Bonsai-27B-mmproj-Q8_0.gguf `
-  -ngl 99 -ngld 99 `
-  -ctk f16 -ctv turbo2 -fa on `
+  --mmproj 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-mmproj-Q8_0.gguf' `
+  -ngl 999 -ngld 999 `
+  -ctk f16 -ctv turbo2 -ctkd f16 -ctvd f16 -fa on `
   --ctx-size 32768 --parallel 1 --context-shift `
   --reasoning off
 ```
@@ -189,12 +202,28 @@ build\bin\Release\llama-server.exe `
   -m C:\models\Qwen3.6-Native-MTP.gguf `
   --spec-type draft-mtp `
   --spec-draft-n-max 2 `
-  -ngl 999 -ngld 999 --n-cpu-moe 12 `
-  -ctk f16 -ctv f16 -ctkd f16 -ctvd f16 `
+  -ngl 999 -ngld 999 --n-cpu-moe 28 `
+  -ctk turbo4 -ctv turbo3 -ctkd f16 -ctvd f16 `
   -fa on --context-shift --reasoning off
 ```
 
-The checked-in launcher is [`scripts/run-qwen36-27b-nextn-server.sh`](scripts/run-qwen36-27b-nextn-server.sh).
+This is the owner's normal Qwen cache configuration: target K/V use
+`turbo4`/`turbo3`, while the small embedded draft context remains explicitly f16.
+All-f16 target KV is retained as a diagnostic profile, but is not the daily-driver
+default. The PowerShell wrapper command is `./run-gemma.ps1 -Qwen`; portable shell
+launchers are [`scripts/run-qwen36-27b-nextn-server.sh`](scripts/run-qwen36-27b-nextn-server.sh)
+and [`scripts/run-qwen36-35ba3b-nextn-server.sh`](scripts/run-qwen36-35ba3b-nextn-server.sh).
+
+## Canonical launcher
+
+[`scripts/atomic-launcher.ps1`](scripts/atomic-launcher.ps1) is the shared launch
+contract for the owner wrapper and configuration UI. It supports `Describe`,
+`Resolve`, `Validate`, `Preview`, and `Launch` actions; non-launch actions return
+structured JSON. Profiles live in
+[`scripts/atomic-launcher/profiles.json`](scripts/atomic-launcher/profiles.json),
+while explicit settings from the wrapper or UI take precedence. The launcher probes
+the selected executable and fails preflight when a required Atomic option or
+speculative type is absent instead of silently dropping it.
 
 ## Confirm the server before connecting a frontend
 
