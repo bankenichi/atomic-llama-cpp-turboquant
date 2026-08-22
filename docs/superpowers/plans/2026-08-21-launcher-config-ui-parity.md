@@ -109,12 +109,13 @@ new focused modules where the current monolithic files obscure ownership.
 
 1. Add stack/model controls for Gemma, Qwen, and Ternary target/draft/mmproj
    topology.
-2. Add speculative controls for Gemma MTP, Qwen NextN, NextN async opt-in, Ternary
-   DSpark, and target-only fallbacks.
+2. Add speculative controls for Gemma MTP, synchronous Qwen NextN, Ternary DSpark,
+   and target-only fallbacks. Do not expose the removed historical
+   `LLAMA_NEXTN_ASYNC` or `LLAMA_PIPELINE_DEPTH2` paths.
 3. Add vision, prompt cache, context shifting, target/draft KV, TurboQuant, GPU
    layers, CPU MoE, batching, and flash-attention controls.
 4. Add structured Atomic environment controls for expert prefetch, slot count,
-   host registration, pipeline behavior, and adaptive TurboQuant.
+   host registration, and adaptive TurboQuant.
 5. Add server/API/chat/reasoning/template controls and a conflict-aware advanced
    arguments escape hatch.
 6. Add review/run output for validation, warnings, exact argv, environment,

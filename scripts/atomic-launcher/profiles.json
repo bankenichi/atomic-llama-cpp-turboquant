@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "host": "127.0.0.1",
+    "port": 8081,
+    "ctx_size": 0,
+    "gpu_layers": 999,
+    "draft_gpu_layers": 999,
+    "keep": -1,
+    "parallel": 1,
+    "batch_size": 0,
+    "ubatch_size": 0,
+    "flash_attention": "on",
+    "jinja": true,
+    "context_shift": true,
+    "reasoning": "auto",
+    "metrics": true,
+    "slots_endpoint": true,
+    "vision_enabled": true,
+    "spec_enabled": false,
+    "spec_type": "none",
+    "spec_draft_n_max": 2,
+    "spec_draft_n_min": 0,
+    "spec_draft_p_min": 0.0,
+    "cache_type_k": "f16",
+    "cache_type_v": "f16",
+    "draft_cache_type_k": "f16",
+    "draft_cache_type_v": "f16",
+    "n_cpu_moe": 0,
+    "has_moe": false,
+    "prefetch_experts": false,
+    "prefetch_slots": 1,
+    "pin_host": false,
+    "no_mmap": true,
+    "mlock": true,
+    "turbo_layer_adaptive": null,
+    "model": "",
+    "draft_model": "",
+    "mmproj": "",
+    "extra_arguments": []
+  },
+  "stacks": {
+    "gemma26": {
+      "label": "Gemma 4 26B-A4B",
+      "base": {
+        "model_file": "gemma-4-26B-A4B-it-qat-q4_0-unquantized-heretic.i1-Q4_K_M.gguf",
+        "draft_model_file": "mtp-gemma-4-26B-A4B-it.gguf",
+        "mmproj_file": "mmproj-gemma-4-26B-A4B-it-qat-heretic-BF16.gguf",
+        "cache_type_k": "turbo4",
+        "cache_type_v": "turbo2",
+        "draft_cache_type_k": "turbo3",
+        "draft_cache_type_v": "turbo3",
+        "n_cpu_moe": 14,
+        "has_moe": true,
+        "prefetch_experts": true,
+        "vision_enabled": true
+      },
+      "presets": {
+        "standard": {
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "mtp": {
+          "spec_enabled": true,
+          "spec_type": "draft-mtp",
+          "spec_draft_n_max": 2
+        },
+        "text-only": {
+          "vision_enabled": false,
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "full-f16": {
+          "cache_type_k": "f16",
+          "cache_type_v": "f16",
+          "draft_cache_type_k": "f16",
+          "draft_cache_type_v": "f16"
+        }
+      }
+    },
+    "gemma12": {
+      "label": "Gemma 4 12B dense",
+      "base": {
+        "model_file": "gemma-4-12B-coder-fable5-composer2.5-v1-uncensored-heretic.i1-Q4_K_M.gguf",
+        "mmproj_file": "gemma4-12b-unsloth-mmproj-F16.gguf",
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        "vision_enabled": true,
+        "has_moe": false,
+        "prefetch_experts": false
+      },
+      "presets": {
+        "standard": {
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "text-only": {
+          "vision_enabled": false,
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "full-f16": {
+          "cache_type_k": "f16",
+          "cache_type_v": "f16"
+        }
+      }
+    },
+    "qwen": {
+      "label": "Qwen 3.6 35B-A3B embedded NextN",
+      "base": {
+        "model_file": "Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-I-Compact.gguf",
+        "mmproj_file": "mmproj.gguf",
+        "cache_type_k": "turbo4",
+        "cache_type_v": "turbo3",
+        "draft_cache_type_k": "f16",
+        "draft_cache_type_v": "f16",
+        "n_cpu_moe": 28,
+        "has_moe": true,
+        "prefetch_experts": true,
+        "vision_enabled": true,
+        "spec_enabled": true,
+        "spec_type": "draft-mtp",
+        "spec_draft_n_max": 2
+      },
+      "presets": {
+        "standard": {},
+        "target-only": {
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "text-only": {
+          "vision_enabled": false
+        },
+        "full-f16": {
+          "cache_type_k": "f16",
+          "cache_type_v": "f16",
+          "draft_cache_type_k": "f16",
+          "draft_cache_type_v": "f16"
+        }
+      }
+    },
+    "ternary": {
+      "label": "Ternary Bonsai 27B",
+      "base": {
+        "model_file": "Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf",
+        "draft_model_file": "Ternary-Bonsai-27B-dspark-Q4_1.gguf",
+        "mmproj_file": "Ternary-Bonsai-27B-mmproj-Q8_0.gguf",
+        "ctx_size": 32768,
+        "cache_type_k": "f16",
+        "cache_type_v": "turbo2",
+        "draft_cache_type_k": "f16",
+        "draft_cache_type_v": "f16",
+        "has_moe": false,
+        "prefetch_experts": false,
+        "vision_enabled": true,
+        "spec_enabled": true,
+        "spec_type": "draft-dspark",
+        "spec_draft_n_max": 4,
+        "draft_context_limit": 4096,
+        "draft_slot_limit": 16
+      },
+      "presets": {
+        "standard": {},
+        "target-only": {
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "text-only": {
+          "vision_enabled": false
+        },
+        "target-text": {
+          "vision_enabled": false,
+          "spec_enabled": false,
+          "spec_type": "none"
+        },
+        "full-f16": {
+          "cache_type_k": "f16",
+          "cache_type_v": "f16",
+          "draft_cache_type_k": "f16",
+          "draft_cache_type_v": "f16"
+        }
+      }
+    }
+  }
+}

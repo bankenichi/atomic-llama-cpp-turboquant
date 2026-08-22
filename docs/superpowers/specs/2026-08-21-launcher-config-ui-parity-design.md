@@ -108,12 +108,13 @@ The default local model paths are updated to the actual files in
 
 ### Qwen 3.6
 
-Support embedded NextN through `draft-mtp`, synchronous multi-step drafting by
-default, and `LLAMA_NEXTN_ASYNC=1` as an explicit opt-in. The normal owner cache
-configuration is target K `turbo4` and target V `turbo3`; it is not the all-f16
-configuration currently shown in the README. Draft-cache types remain explicit in
-the resolved configuration so command previews and documentation cannot imply an
-unknown default.
+Support embedded NextN through `draft-mtp` and the converged synchronous multi-step
+implementation. Historical `LLAMA_NEXTN_ASYNC` and `LLAMA_PIPELINE_DEPTH2` controls
+do not exist in the converged runtime and must not be reintroduced or advertised.
+The normal owner cache configuration is target K `turbo4` and target V `turbo3`;
+it is not the all-f16 configuration currently shown in the README. Draft-cache
+types remain explicit in the resolved configuration so command previews and
+documentation cannot imply an unknown default.
 
 The standard profile uses the owner's normal CPU-MoE placement and a draft maximum
 of two tokens. A target-only profile remains available for diagnosis and comparison.
@@ -155,7 +156,6 @@ effective-command output, and documentation.
 
 - Gemma assistant MTP;
 - Qwen embedded NextN using the synchronous multi-step default;
-- optional Qwen async depth-2 mode;
 - Ternary Bonsai DSpark;
 - target-only fallbacks for all stacks;
 - target and draft context, GPU layers, cache types, maximum/minimum draft length,
@@ -200,8 +200,6 @@ media-aware shifts, and target/draft cache rebuilds.
 - flash attention;
 - expert prefetch through `GGML_SCHED_PREFETCH_EXPERTS`, including slot count;
 - mmap host registration through `GGML_CUDA_REGISTER_HOST`;
-- Qwen async NextN through `LLAMA_NEXTN_ASYNC`;
-- Gemma pipeline settings already supported by the fork;
 - adaptive TurboQuant settings such as `TURBO_LAYER_ADAPTIVE` where applicable;
 - relevant thread, NUMA, mmap, mlock, and device controls supported by the current
   binary.
