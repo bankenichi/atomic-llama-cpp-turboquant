@@ -1,14 +1,14 @@
 #pragma once
 
-// Tracks whether a slot's draft context represents the same prefix as its
-// target context. Multimodal requests intentionally bypass the drafter, so a
-// later text request must not reuse the target prefix until both contexts have
-// been cleared and rebuilt together.
+// Tracks whether a slot's active speculative implementations represent a prefix
+// that can safely continue from the target. Media invalidates this state only
+// when no configured implementation has a proven media policy; capable
+// implementations advance or rebase alongside the target.
 struct server_spec_context_state {
     bool synchronized = false;
 
-    bool begin_request(bool has_media) {
-        if (has_media) {
+    bool begin_request(bool has_media, bool media_supported) {
+        if (has_media && !media_supported) {
             synchronized = false;
             return false;
         }

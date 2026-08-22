@@ -5,6 +5,56 @@
 
 struct common_speculative;
 
+// Real media has different implications for each speculative algorithm. Keep
+// this contract in the speculative layer so the server does not have to infer
+// safety from an implementation name or from the mere presence of an mmproj.
+enum common_speculative_media_policy {
+    COMMON_SPECULATIVE_MEDIA_POLICY_UNSUPPORTED,
+    COMMON_SPECULATIVE_MEDIA_POLICY_STATELESS,
+    COMMON_SPECULATIVE_MEDIA_POLICY_POST_MEDIA_REBASE,
+    COMMON_SPECULATIVE_MEDIA_POLICY_EMBEDDING_PREFILL,
+};
+
+common_speculative_media_policy common_speculative_media_policy_for_type(common_speculative_type type);
+
+const char * common_speculative_media_policy_name(common_speculative_media_policy policy);
+
+// True when at least one configured implementation has a defined media path.
+// The coordinator may still skip an unsupported implementation in a chain.
+bool common_speculative_supports_media(const common_speculative * spec);
+
+// Select the implementations eligible for a sequence's new request. Returns
+// whether at least one implementation can serve the request.
+bool common_speculative_begin_request(
+        common_speculative * spec, llama_seq_id seq_id, bool has_media);
+
+// Announces one real-media chunk before its target embedding batches are
+// decoded. `n_tokens` is the number of encoder rows; `n_pos` is the number of
+// one-dimensional context positions consumed by the chunk. They differ for
+// M-RoPE vision models.
+void common_speculative_begin_media(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        llama_pos pos_start,
+        int32_t n_pos,
+        int32_t n_tokens);
+
+bool common_speculative_can_speculate(const common_speculative * spec, llama_seq_id seq_id);
+
+// Used by server batching so sequences with different implementation state are
+// never mirrored through the same unfiltered draft batch.
+uint64_t common_speculative_eligibility_mask(const common_speculative * spec, llama_seq_id seq_id);
+
+// False after a stateful implementation was skipped or failed, even if a
+// stateless fallback remains eligible.
+bool common_speculative_state_is_coherent(const common_speculative * spec, llama_seq_id seq_id);
+
+// Post-media implementations own a draft position domain that cannot be shifted
+// with target absolute ranges. The server uses this query to select transactional
+// reprefill for retained-media context shifts.
+bool common_speculative_requires_media_reprefill(
+        const common_speculative * spec, llama_seq_id seq_id);
+
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);
 

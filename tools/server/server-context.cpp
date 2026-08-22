@@ -269,9 +269,10 @@ struct server_slot {
 
         std::vector<uint8_t> data_spec;
         // Only a coherent target/draft pair can export implementation boundary
-        // state. Saving a target-only media state as coherent would allow a
-        // later cache hit to skip the required paired rebuild.
-        const bool draft_synchronized = spec && spec_context_state.is_synchronized();
+        // state. A stateless fallback may remain usable after a stateful drafter
+        // fails, but that does not make the stale draft memory cacheable.
+        const bool draft_synchronized = spec && spec_context_state.is_synchronized() &&
+                common_speculative_state_is_coherent(spec, id);
         if (draft_synchronized) {
             common_speculative_get_state(spec, id, data_spec);
         }
@@ -439,6 +440,8 @@ struct server_slot {
         return task->type == other_slot.task->type
             && inp_embd.size() == other_slot.inp_embd.size()
             && task->tokens.has_media() == other_slot.task->tokens.has_media()
+            && (!spec || common_speculative_eligibility_mask(spec, id) ==
+                    common_speculative_eligibility_mask(spec, other_slot.id))
             && are_lora_equal(lora, other_slot.lora);
     }
 
@@ -456,12 +459,12 @@ struct server_slot {
     }
 
     bool can_speculate() const {
-        // Draft models consume target-model hidden states for every prompt
-        // position. Image/audio positions have embeddings, not target token
-        // hidden states that can safely be mirrored into the draft context.
-        // Keep the draft model loaded and available for text-only requests, but
-        // disable it for the complete lifetime of a request containing media.
-        return !!spec && (!task || !task->tokens.has_media());
+        // Media handling is an implementation property. DFlash/DSpark consumes
+        // target embedding rows, n-grams are stateless, and token-aligned
+        // assistants rebase at a target-hidden-state boundary. A request-wide
+        // media veto would permanently disable full-history multimodal chats.
+        return !!spec && common_speculative_can_speculate(spec, id) &&
+                (!task || !task->tokens.has_media() || common_speculative_supports_media(spec));
     }
 
     void add_token(const completion_token_output & token) {
@@ -483,7 +486,7 @@ struct server_slot {
         // determine the max draft that fits the current slot state
         // note: slot.prompt is not yet expanded with the `id` token sampled above
         //       also, need to leave space for 1 extra token to allow context shifts
-        int n_draft_max = n_ctx - prompt.n_tokens() - 2;
+        int n_draft_max = n_ctx - prompt.tokens.pos_next() - 2;
 
         if (n_remaining() > 0) {
             n_draft_max = std::min(n_draft_max, n_remaining() - 1);
@@ -743,6 +746,15 @@ static int process_mtmd_chunk(
     const auto & mctx = slot.mctx;
     const auto & chunk = input_tokens.find_chunk(idx);
     int32_t res = 0;
+
+    if (slot.can_speculate()) {
+        common_speculative_begin_media(
+                slot.spec,
+                slot.id,
+                slot.prompt.tokens.pos_next(),
+                (int32_t) mtmd_input_chunk_get_n_pos(chunk.get()),
+                (int32_t) mtmd_input_chunk_get_n_tokens(chunk.get()));
+    }
 
     auto try_decode = [&]() -> int32_t {
         if (mbatch) {
@@ -2930,7 +2942,13 @@ private:
                 const bool use_spec = slot.can_speculate();
                 const bool can_shift_tgt = llama_memory_can_shift(llama_get_memory(ctx_tgt));
                 const bool can_shift_dft = !use_spec || !ctx_dft || llama_memory_can_shift(llama_get_memory(ctx_dft));
-                const bool can_inplace = can_shift_tgt && can_shift_dft;
+                const bool has_media = slot.task && slot.task->tokens.has_media();
+                const bool private_media_positions = use_spec && has_media &&
+                        common_speculative_requires_media_reprefill(spec.get(), slot.id);
+                // EAGLE/MTP/draft-simple may omit expanded image positions from
+                // draft KV. Applying target absolute erase/shift ranges to that
+                // private domain would silently move the wrong rows.
+                const bool can_inplace = can_shift_tgt && can_shift_dft && !private_media_positions;
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d, mode = %s\n",
                         n_keep, n_left, n_discard, can_inplace ? "shift" : "reprefill");
@@ -3036,6 +3054,15 @@ private:
                         slot.release();
                         return;
                     }
+
+                    if (use_spec) {
+                        // Post-media-rebase implementations own a private compact
+                        // position domain. Re-run their begin hook after target
+                        // reprefill so context shift cannot leave that mapping at
+                        // the pre-shift boundary.
+                        common_speculative_begin(
+                                spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
+                    }
                 }
 
                 slot.truncated = true;
@@ -3099,7 +3126,10 @@ private:
                         common_speculative_get_draft_params(spec.get(), slot.id) = {
                             /* .drafting = */ true,
                             /* .n_max    = */ n_draft_max,
-                            /* .n_past   = */ slot.prompt.n_tokens(),
+                            // Media chunks can occupy more target positions than
+                            // serialized placeholders. Draft positions must use
+                            // the target's real next position.
+                            /* .n_past   = */ slot.prompt.tokens.pos_next(),
                             /* .id_last  = */ slot.sampled,
                             /* .prompt   = */ &slot.spec_prompt,
                             /* .result   = */ &slot.spec_draft,
@@ -3234,12 +3264,14 @@ private:
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
 
-                        // A multimodal request advances only the target context. If a
-                        // later text request lands on the same slot, discard any target
-                        // cache hit until the target and draft have been rebuilt from
-                        // position zero together.
+                        // Only implementations without a proven media path need
+                        // the legacy paired rebuild. Capable implementations
+                        // advance or rebase while the target processes media.
+                        const bool media_supported = spec && common_speculative_begin_request(
+                                spec.get(), slot.id, input_tokens.has_media());
                         const bool force_spec_rebuild = spec &&
-                                slot.spec_context_state.begin_request(input_tokens.has_media());
+                                slot.spec_context_state.begin_request(
+                                    input_tokens.has_media(), media_supported);
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -3830,10 +3862,9 @@ private:
         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
         //       for now, always re-evaluate for simplicity
         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
-        // Batches are homogeneous with respect to real media (enforced by
-        // can_batch_with()). Do not mirror any part of a multimodal request into
-        // the draft context: text chunks surrounding an image would otherwise
-        // leave the draft at positions that cannot match the target context.
+        // Batches are homogeneous in media status and speculative eligibility.
+        // Each implementation consumes embeddings, rebases at a media boundary,
+        // or remains stateless according to its declared policy.
         if (spec && batch.slot_batched && batch.slot_batched->can_speculate()) {
             bool ok = true;
             queue_tasks.yield_to_queue([&]() {
@@ -3847,15 +3878,18 @@ private:
                 throw std::runtime_error("failed to process speculative batch");
             }
 
-            // common_speculative_process() has now mirrored every sequence in
-            // this text-only batch. Mark only the participating slots: a later
-            // decode failure or an unbatched slot must remain invalid and force
-            // another full rebuild on its next request.
+            // Mark only sequences whose stateful implementations remain
+            // coherent. A healthy n-gram fallback can continue after a draft
+            // model failure without making that model's stale memory cacheable.
             for (int32_t i = 0; i < batch_view.n_tokens; ++i) {
                 for (int32_t j = 0; j < batch_view.n_seq_id[i]; ++j) {
                     const llama_seq_id seq_id = batch_view.seq_id[i][j];
                     if (seq_id >= 0 && seq_id < (llama_seq_id) slots.size()) {
-                        slots[seq_id].spec_context_state.mark_synchronized();
+                        if (common_speculative_state_is_coherent(spec.get(), seq_id)) {
+                            slots[seq_id].spec_context_state.mark_synchronized();
+                        } else {
+                            slots[seq_id].spec_context_state.invalidate();
+                        }
                     }
                 }
             }
@@ -3949,7 +3983,11 @@ private:
                 return;
             }
 
-            if (slot.can_speculate() && !slot.spec_draft.empty()) {
+            if (!slot.spec_draft.empty()) {
+                // Eligibility may have been revoked while mirroring this
+                // already-decoded verification batch. It still has to be
+                // finalized from valid target logits before normal sampling can
+                // resume, otherwise spec_i_batch leaks into the next cycle.
                 return; // sample using speculative decoding
             }
 
@@ -4002,7 +4040,7 @@ private:
 
         // speculative decoding - main model sample and accept
         iterate(slots, [&](server_slot & slot) {
-            if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() ||
+            if (slot.state != SLOT_STATE_GENERATING ||
                     slot.spec_draft.empty() || slot.spec_i_batch.empty()) {
                 return;
             }
