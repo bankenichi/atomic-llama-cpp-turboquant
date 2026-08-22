@@ -55,6 +55,15 @@ bool common_speculative_state_is_coherent(const common_speculative * spec, llama
 bool common_speculative_requires_media_reprefill(
         const common_speculative * spec, llama_seq_id seq_id);
 
+// True when an active implementation translates target positions into a
+// private draft domain. Such a context must not receive target-absolute cache
+// shifts and can only reuse prefixes still represented by its retained window.
+bool common_speculative_has_private_positions(
+        const common_speculative * spec, llama_seq_id seq_id);
+
+bool common_speculative_can_reuse_prefix(
+        const common_speculative * spec, llama_seq_id seq_id, llama_pos target_pos);
+
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);
 
@@ -82,6 +91,54 @@ struct common_speculative_output_limits {
     int32_t total;
     int32_t per_seq;
 };
+
+// DFlash/DSpark keep a private position domain because published sidecars have a
+// much shorter trained context than their targets. These POD helpers are public
+// only so rollover and cache-state behavior can be tested without loading a
+// model; the speculative implementation remains the sole owner of draft KV.
+struct common_speculative_draft_window_state {
+    llama_pos origin = 0; // absolute target position represented by local position zero
+    llama_pos next   = 0; // next uncommitted position in the local draft window
+};
+
+struct common_speculative_draft_window_plan {
+    bool reset = false;
+    llama_pos truncate_from = -1;
+    llama_pos discard = 0;
+    llama_pos origin = 0;
+    llama_pos local_begin = 0;
+    llama_pos local_end = 0;
+};
+
+// Plan an injection of [target_begin, target_begin + n_positions). The caller
+// applies reset/truncate/discard to KV in that order and commits local_end only
+// after decode succeeds. Returns false for a gap, a prefix older than the
+// retained window, or an impossible capacity/reserve combination.
+bool common_speculative_draft_window_plan_make(
+        const common_speculative_draft_window_state & state,
+        llama_pos target_begin,
+        llama_pos n_positions,
+        llama_pos capacity,
+        llama_pos reserve,
+        llama_pos rollover_chunk,
+        common_speculative_draft_window_plan & plan);
+
+std::vector<uint8_t> common_speculative_draft_window_state_serialize(
+        const common_speculative_draft_window_state & state);
+
+bool common_speculative_draft_window_state_restore(
+        const std::vector<uint8_t> & data,
+        llama_pos capacity,
+        llama_pos reserve,
+        common_speculative_draft_window_state & state);
+
+// Check the dense local-position invariant expected after restoring draft KV.
+// Serialized mapping bytes are not sufficient evidence that the corresponding
+// physical cache was restored successfully.
+bool common_speculative_draft_window_matches_positions(
+        const common_speculative_draft_window_state & state,
+        llama_pos pos_min,
+        llama_pos pos_max);
 
 // return the output limits needed for speculative decoding
 common_speculative_output_limits common_speculative_get_output_limits(

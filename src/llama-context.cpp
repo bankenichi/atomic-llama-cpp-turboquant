@@ -4242,3 +4242,7 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
 }
+
+bool llama_context_is_flash_attn(const struct llama_context * ctx) {
+    return ctx && ctx->get_cparams().flash_attn;
+}

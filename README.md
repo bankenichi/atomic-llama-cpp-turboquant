@@ -55,7 +55,7 @@ There are three supported draft layouts:
 
 | Target | Draft artifact | CLI type | Notes |
 |---|---|---|---|
-| Ternary Bonsai 27B | Prism DSpark sidecar | `draft-dspark` | Block-diffusion draft, maximum 4096 positions per slot |
+| Ternary Bonsai 27B | Prism DSpark sidecar | `draft-dspark` | Block-diffusion draft; sliding 4096-position private window per slot |
 | Gemma 4 | Separate assistant GGUF | `draft-mtp` | Supports modern and historical `gemma4_assistant` files |
 | Qwen 3.6 native-MTP | Embedded in target GGUF | `draft-mtp` | Reopens the same file with the draft architecture; no second path |
 
@@ -64,7 +64,9 @@ There are three supported draft layouts:
 - Current `llama.cpp` server, model, backend, and multimodal architecture.
 - Prism Bonsai/Q2_0-G128 model loading and the published legacy raw-type-42 GGUFs.
 - `draft-dspark` speculative decoding, with strict metadata validation and a
-  4096-position draft-context limit per parallel slot.
+  4096-position draft-context limit per parallel slot. The limit is the
+  sidecar's trained window, not a target-conversation limit: Atomic slides the
+  draft KV window so DSpark continues past target position 4096.
 - Unified `draft-mtp` decoding for Gemma assistant sidecars and embedded Qwen
   NextN heads.
 - Media-aware speculation for DSpark/DFlash, EAGLE3, MTP/NextN, standalone draft

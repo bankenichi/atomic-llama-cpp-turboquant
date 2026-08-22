@@ -17,6 +17,7 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "../../src/llama-ext.h" // staging diagnostics for the post-validation flash-attention state
 
 #include <algorithm>
 #include <cstddef>
@@ -1187,6 +1188,19 @@ private:
 
         n_ctx = llama_n_ctx(ctx_tgt);
 
+        // The library's detailed context diagnostics can be filtered at the
+        // server's normal verbosity. Keep one post-construction line here so a
+        // captured production log proves which context/cache policy actually
+        // reached the target context rather than merely echoing argv.
+        SRV_INF("target runtime: ctx_per_seq=%u, cache_k_requested=%s, cache_v_requested=%s, flash_attn=%s, "
+                "load_mode=%s, ctx_shift=%s\n",
+                llama_n_ctx_seq(ctx_tgt),
+                ggml_type_name(params_base.cache_type_k),
+                ggml_type_name(params_base.cache_type_v),
+                llama_context_is_flash_attn(ctx_tgt) ? "enabled" : "disabled",
+                llama_load_mode_name(params_base.load_mode),
+                params_base.ctx_shift ? "enabled" : "disabled");
+
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
         if (has_spec) {
@@ -1507,6 +1521,13 @@ private:
                 /* media_path            */ params_base.media_path,
                 /* force_pure_content    */ params_base.force_pure_content_parser
             };
+
+            SRV_INF("chat runtime: jinja=%s, reasoning=%s, vision=%s, audio=%s, video=%s\n",
+                    chat_params.use_jinja ? "enabled" : "disabled",
+                    chat_params.enable_thinking ? "enabled" : "disabled",
+                    chat_params.allow_image ? "enabled" : "disabled",
+                    chat_params.allow_audio ? "enabled" : "disabled",
+                    chat_params.allow_video ? "enabled" : "disabled");
 
             {
                 auto caps = common_chat_templates_get_caps(chat_params.tmpls.get());
@@ -2943,12 +2964,13 @@ private:
                 const bool can_shift_tgt = llama_memory_can_shift(llama_get_memory(ctx_tgt));
                 const bool can_shift_dft = !use_spec || !ctx_dft || llama_memory_can_shift(llama_get_memory(ctx_dft));
                 const bool has_media = slot.task && slot.task->tokens.has_media();
-                const bool private_media_positions = use_spec && has_media &&
-                        common_speculative_requires_media_reprefill(spec.get(), slot.id);
-                // EAGLE/MTP/draft-simple may omit expanded image positions from
-                // draft KV. Applying target absolute erase/shift ranges to that
-                // private domain would silently move the wrong rows.
-                const bool can_inplace = can_shift_tgt && can_shift_dft && !private_media_positions;
+                const bool private_positions = use_spec && (
+                        common_speculative_has_private_positions(spec.get(), slot.id) ||
+                        (has_media && common_speculative_requires_media_reprefill(spec.get(), slot.id)));
+                // Some media-aware implementations omit expanded image rows;
+                // DFlash/DSpark also roll a permanently private draft window.
+                // Target-absolute erase ranges are invalid for either domain.
+                const bool can_inplace = can_shift_tgt && can_shift_dft && !private_positions;
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d, mode = %s\n",
                         n_keep, n_left, n_discard, can_inplace ? "shift" : "reprefill");
@@ -3116,6 +3138,7 @@ private:
                                 slot.prompt.n_tokens(),
                                 llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
                                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
+                        common_speculative_get_state(spec.get(), slot.id, slot.spec_ckpt.data_spec);
 
                         if (use_ckpt_dft) {
                             slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
@@ -3338,7 +3361,8 @@ private:
 
                                 const bool can_cache_reuse =
                                     llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
-                                    !slot.prompt.tokens.has_mtmd;
+                                    !slot.prompt.tokens.has_mtmd &&
+                                    !(spec && common_speculative_has_private_positions(spec.get(), slot.id));
 
                                 if (!can_cache_reuse && n_cache_reuse > 0) {
                                     SLT_WRN(slot, "cache reuse is not supported - ignoring n_cache_reuse = %d\n", n_cache_reuse);
@@ -3406,6 +3430,18 @@ private:
                                 // at position zero. Keep the slot invalid until the
                                 // first rebuilt text batch has actually succeeded in
                                 // both contexts.
+                            }
+
+                            if (spec && n_past > 0) {
+                                const llama_pos reuse_pos = slot.prompt.tokens.pos_next(n_past);
+                                if (!common_speculative_can_reuse_prefix(spec.get(), slot.id, reuse_pos)) {
+                                    SLT_INF(slot,
+                                            "cached prefix ends at target position %d, before the retained private "
+                                            "draft window; forcing paired prompt rebuild\n",
+                                            (int) reuse_pos);
+                                    n_past = 0;
+                                    slot.prompt.checkpoints.clear();
+                                }
                             }
 
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
@@ -4086,6 +4122,7 @@ private:
                         if (slot.ctx_dft) {
                             ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         }
+                        common_speculative_set_state(spec.get(), slot.id, ckpt.data_spec);
 
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);
 

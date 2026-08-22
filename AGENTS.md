@@ -43,6 +43,10 @@ while keeping the repository mergeable with future upstream releases.
    to current IDs 241-244.
 8. **DSpark** accepts modern DFlash and legacy Prism metadata, validates integer
    values strictly, and caps draft context at 4096 positions per parallel slot.
+   Its target-absolute/private-local mapping slides in bounded chunks, is saved
+   with checkpoints, and forces paired rebuild or transactional reprefill where
+   target-absolute cache operations would be unsafe. Long target sequences must
+   continue drafting past position 4096.
 9. **Adaptive Bonsai flash attention** supports separate F16 K / Q8_0 V at
     576x512 without using the DeepSeek MLA K-subview stride. Keep both CUDA layout
     tests.

@@ -116,6 +116,10 @@ LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uin
 
 LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 
+// Effective value after context validation and automatic enablement (for
+// example quantized V or TurboQuant KV). Intended for runtime diagnostics.
+LLAMA_API bool llama_context_is_flash_attn(const struct llama_context * ctx);
+
 //
 // model/context data extraction
 //

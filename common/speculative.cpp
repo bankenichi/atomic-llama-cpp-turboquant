@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <cinttypes>
 
@@ -183,6 +184,9 @@ struct common_speculative_impl {
     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
     virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
     virtual void set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) {}
+
+    virtual bool has_private_positions(llama_seq_id /*seq_id*/) const { return false; }
+    virtual bool can_reuse_prefix(llama_seq_id /*seq_id*/, llama_pos /*target_pos*/) const { return true; }
 };
 
 struct common_speculative_impl_draft_simple : public common_speculative_impl {
@@ -1149,6 +1153,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     };
     std::vector<media_prefill_state> media_prefill;
 
+    // The target can be 32K or larger while published DSpark sidecars are
+    // trained for 4096 positions. Keep an explicitly mapped private KV domain
+    // rather than addressing the draft with target-absolute positions.
+    std::vector<common_speculative_draft_window_state> windows;
+    std::vector<llama_pos> verify_local_begin;
+    std::vector<int32_t> verify_rows;
+    std::vector<uint8_t> awaiting_verification;
+
+    llama_pos window_capacity = 0;
+    llama_pos window_reserve = 0;
+    llama_pos rollover_chunk = 0;
+
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
         : common_speculative_impl(type, n_seq)
@@ -1170,6 +1186,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
         media_prefill.resize(n_seq);
+        windows.resize(n_seq);
+        verify_local_begin.assign(n_seq, -1);
+        verify_rows.assign(n_seq, 0);
+        awaiting_verification.assign(n_seq, 0);
 
         // Modern DFlash and the original Prism DSpark exporter use different
         // metadata namespaces for the same block-diffusion runtime contract.
@@ -1232,6 +1252,43 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
 
+        window_capacity = (llama_pos) llama_n_ctx_seq(ctx_dft);
+        window_reserve = this->params.n_max + (is_dspark && sample_from_anchor ? 0 : 1);
+        if (window_reserve <= 0 || window_reserve >= window_capacity) {
+            throw std::runtime_error(string_format(
+                    "%s draft block reserve %d does not fit the %d-position draft context",
+                    common_speculative_type_to_str(type).c_str(), (int) window_reserve, (int) window_capacity));
+        }
+        const llama_pos max_verification_rows = (llama_pos) this->params.n_max + 1;
+        if (max_verification_rows > window_capacity - window_reserve) {
+            // Verification reinjects the sampled anchor plus every proposal.
+            // The entire span must coexist until accept() trims its rejected
+            // suffix; rolling within it would discard rows from its beginning.
+            throw std::runtime_error(string_format(
+                    "%s verification span %d does not fit the usable %d-position draft window",
+                    common_speculative_type_to_str(type).c_str(), (int) max_verification_rows,
+                    (int) (window_capacity - window_reserve)));
+        }
+        if (!llama_memory_can_shift(llama_get_memory(ctx_dft))) {
+            // Rollover requires translating every retained key by the same
+            // delta. Continuing with an unshiftable cache would either fail at
+            // 4096 again or silently attend with inconsistent RoPE positions.
+            throw std::runtime_error(string_format(
+                    "%s requires a shift-capable draft KV cache for long-context rollover",
+                    common_speculative_type_to_str(type).c_str()));
+        }
+        rollover_chunk = std::min<llama_pos>(512, window_capacity - window_reserve);
+
+        LOG_INF("%s: - draft_ctx_per_seq=%d, cache_k_requested=%s, cache_v_requested=%s, "
+                "flash_attn=%s, gpu_layers_requested=%d, devices=[%s], op_offload=disabled, "
+                "window_reserve=%d, rollover_chunk=%d\n",
+                __func__, (int) window_capacity,
+                ggml_type_name(this->params.cache_type_k), ggml_type_name(this->params.cache_type_v),
+                llama_context_is_flash_attn(ctx_dft) ? "enabled" : "disabled",
+                this->params.n_gpu_layers,
+                common_speculative_get_devices_str(this->params.devices).c_str(),
+                (int) window_reserve, (int) rollover_chunk);
+
         batch        = llama_batch_init(llama_n_batch(ctx_dft), 0,          n_seq);
         batch_inject = llama_batch_init(llama_n_batch(ctx_dft), n_embd_dec, n_seq);
 
@@ -1286,22 +1343,89 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         llama_batch_free(batch_inject);
     }
 
+    bool apply_window_plan(
+            llama_seq_id seq_id,
+            const common_speculative_draft_window_plan & plan) {
+        auto * mem_dft = llama_get_memory(params.ctx_dft);
+        auto & state = windows[seq_id];
+
+        if (plan.reset) {
+            if (!llama_memory_seq_rm(mem_dft, seq_id, -1, -1)) {
+                SPC_ERR("%s failed to reset private draft sequence %d\n",
+                        common_speculative_type_to_str(type).c_str(), (int) seq_id);
+                return false;
+            }
+            state = {};
+        }
+
+        if (plan.truncate_from >= 0) {
+            if (!llama_memory_seq_rm(mem_dft, seq_id, plan.truncate_from, -1)) {
+                SPC_ERR("%s failed to truncate private draft sequence %d at local position %d\n",
+                        common_speculative_type_to_str(type).c_str(), (int) seq_id,
+                        (int) plan.truncate_from);
+                return false;
+            }
+            state.next = plan.truncate_from;
+        }
+
+        if (plan.discard > 0) {
+            const llama_pos old_origin = state.origin;
+            const llama_pos retained = state.next - plan.discard;
+            if (!llama_memory_seq_rm(mem_dft, seq_id, 0, plan.discard)) {
+                SPC_ERR("%s failed to discard private draft prefix [0, %d) for sequence %d\n",
+                        common_speculative_type_to_str(type).c_str(), (int) plan.discard, (int) seq_id);
+                return false;
+            }
+            llama_memory_seq_add(mem_dft, seq_id, plan.discard, -1, -plan.discard);
+            state.origin += plan.discard;
+            state.next   -= plan.discard;
+            LOG_INF("%s: rolled draft window for seq %d: origin %d -> %d, discarded=%d, retained=%d\n",
+                    __func__, (int) seq_id, (int) old_origin, (int) state.origin,
+                    (int) plan.discard, (int) retained);
+        }
+
+        if (state.origin != plan.origin || state.next != plan.local_begin) {
+            SPC_ERR("%s private draft mapping diverged for sequence %d (origin=%d/%d, next=%d/%d)\n",
+                    common_speculative_type_to_str(type).c_str(), (int) seq_id,
+                    (int) state.origin, (int) plan.origin, (int) state.next, (int) plan.local_begin);
+            return false;
+        }
+        return true;
+    }
+
+    bool prepare_window(
+            llama_seq_id seq_id,
+            llama_pos target_begin,
+            llama_pos n_positions,
+            common_speculative_draft_window_plan & plan) {
+        if (!common_speculative_draft_window_plan_make(
+                    windows[seq_id], target_begin, n_positions,
+                    window_capacity, window_reserve, rollover_chunk, plan)) {
+            const auto & state = windows[seq_id];
+            SPC_ERR("%s cannot map target span [%d, %d) into seq %d private window "
+                    "(origin=%d, next=%d, capacity=%d, reserve=%d)\n",
+                    common_speculative_type_to_str(type).c_str(), (int) target_begin,
+                    (int) (target_begin + n_positions), (int) seq_id,
+                    (int) state.origin, (int) state.next,
+                    (int) window_capacity, (int) window_reserve);
+            return false;
+        }
+        return apply_window_plan(seq_id, plan);
+    }
+
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
         }
 
-        const int32_t N = (int32_t) prompt.size();
-        if (N <= 0) {
-            return;
-        }
-
         const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(params.ctx_dft), seq_id);
-        if (pos_max < N - 1) {
-            LOG_WRN("%s: ctx_dft pos_max=%d < N-1=%d - process() did not run on every prefill ubatch. "
-                    "Drafts may degrade.\n",
-                    __func__, (int) pos_max, N - 1);
+        const llama_pos expected = windows[seq_id].next - 1;
+        if (pos_max != expected && !(pos_max < 0 && expected < 0)) {
+            LOG_WRN("%s: private draft KV ends at %d but mapping expects %d for seq %d; "
+                    "the next injection will rebuild or reject the inconsistent prefix\n",
+                    __func__, (int) pos_max, (int) expected, (int) seq_id);
         }
+        GGML_UNUSED(prompt);
     }
 
     void begin_media(
@@ -1367,13 +1491,47 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         auto * ctx_tgt = this->params.ctx_tgt;
         auto * ctx_dft = this->params.ctx_dft;
 
-        const int32_t n_ubatch = (int32_t) llama_n_ubatch(ctx_dft);
+        // A draft ubatch can be larger than the usable private window when a
+        // deliberately small context is selected. Bound each injection to the
+        // retained domain so the planner can roll before every chunk instead of
+        // rejecting an otherwise valid long prompt in one oversized request.
+        const int32_t n_ubatch = std::min<int32_t>(
+                (int32_t) llama_n_ubatch(ctx_dft), (int32_t) (window_capacity - window_reserve));
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             if (i_batch_beg[seq_id] < 0) {
                 continue;
             }
             const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
+
+            if (awaiting_verification[seq_id]) {
+                const llama_pos usable = window_capacity - window_reserve;
+                if (has_embeddings || n_rows > usable) {
+                    LOG_ERR("%s: verification feature span for seq %d has %d rows (usable=%d, embeddings=%s)\n",
+                            __func__, (int) seq_id, n_rows, (int) usable,
+                            has_embeddings ? "yes" : "no");
+                    return false;
+                }
+
+                const llama_pos target_begin = batch_in.pos[i_batch_beg[seq_id]];
+                for (int32_t i = 1; i < n_rows; ++i) {
+                    if (batch_in.pos[i_batch_beg[seq_id] + i] != target_begin + i) {
+                        LOG_ERR("%s: non-consecutive verification positions for seq %d at row %d\n",
+                                __func__, (int) seq_id, i);
+                        return false;
+                    }
+                }
+
+                // Reserve the full verification span before chunked encoding.
+                // prepare_window() applies only the required prefix rollover;
+                // each successful chunk below advances the committed boundary.
+                common_speculative_draft_window_plan span_plan;
+                if (!prepare_window(seq_id, target_begin, n_rows, span_plan)) {
+                    return false;
+                }
+                verify_local_begin[seq_id] = span_plan.local_begin;
+                verify_rows[seq_id] = n_rows;
+            }
 
             for (int32_t offset = 0; offset < n_rows; offset += n_ubatch) {
                 const int32_t n_chunk = std::min(n_ubatch, n_rows - offset);
@@ -1455,13 +1613,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
                     for (int32_t pos_off = 0; pos_off < media.n_pos; pos_off += n_ubatch) {
                         const int32_t n_inject = std::min(n_ubatch, media.n_pos - pos_off);
+                        common_speculative_draft_window_plan window_plan;
+                        const llama_pos target_begin = media.pos_start + pos_off;
+                        if (!prepare_window(seq_id, target_begin, n_inject, window_plan)) {
+                            return false;
+                        }
                         batch_inject.n_tokens = n_inject;
                         std::memcpy(
                                 batch_inject.embd,
                                 pooled.data() + (size_t) pos_off * n_embd_dec,
                                 (size_t) n_inject * n_embd_dec * sizeof(float));
                         for (int32_t i = 0; i < n_inject; ++i) {
-                            batch_inject.pos[i]       = media.pos_start + pos_off + i;
+                            batch_inject.pos[i]       = window_plan.local_begin + i;
                             batch_inject.n_seq_id[i]  = 1;
                             batch_inject.seq_id[i][0] = seq_id;
                             batch_inject.logits[i]    = false;
@@ -1471,9 +1634,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                         if (rc_inject != 0) {
                             LOG_ERR("%s: media KV injection failed rc=%d (seq=%d, pos=%d, n=%d)\n",
                                     __func__, rc_inject, (int) seq_id,
-                                    (int) (media.pos_start + pos_off), n_inject);
+                                    (int) target_begin, n_inject);
                             return false;
                         }
+                        windows[seq_id].next = window_plan.local_end;
                     }
 
                     LOG_DBG("%s: pooled %d media rows into %d draft positions [%d, %d) for seq %d\n",
@@ -1483,12 +1647,27 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     continue;
                 }
 
-                // inject the DFlash decoder K/V cache at the tokens' target positions
+                // Translate the target's absolute span into the sidecar's
+                // bounded private position domain before committing decoder KV.
+                const llama_pos target_begin = batch_in.pos[i_batch_beg[seq_id] + offset];
+                for (int32_t i = 1; i < n_chunk; ++i) {
+                    if (batch_in.pos[i_batch_beg[seq_id] + offset + i] != target_begin + i) {
+                        LOG_ERR("%s: non-consecutive target feature positions for seq %d at row %d\n",
+                                __func__, (int) seq_id, i);
+                        return false;
+                    }
+                }
+
+                common_speculative_draft_window_plan window_plan;
+                if (!prepare_window(seq_id, target_begin, n_chunk, window_plan)) {
+                    return false;
+                }
+
                 batch_inject.n_tokens = n_chunk;
                 std::memcpy(batch_inject.embd, inp_g, (size_t) n_chunk * n_embd_dec * sizeof(float));
 
                 for (int32_t i = 0; i < n_chunk; ++i) {
-                    batch_inject.pos[i]       = batch_in.pos[i_batch_beg[seq_id] + offset + i];
+                    batch_inject.pos[i]       = window_plan.local_begin + i;
                     batch_inject.n_seq_id[i]  = 1;
                     batch_inject.seq_id[i][0] = seq_id;
                     batch_inject.logits[i]    = false;
@@ -1499,6 +1678,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                             __func__, rc, (int) n_chunk, (int) offset);
                     return false;
                 }
+                windows[seq_id].next = window_plan.local_end;
             }
         }
 
@@ -1514,6 +1694,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // record where each block starts and its size
         std::vector<int32_t> i_block_beg(n_seq, -1);
         std::vector<int32_t> n_block    (n_seq,  0);
+        std::vector<llama_pos> block_local_begin(n_seq, -1);
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -1523,15 +1704,22 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             common_sampler_reset(smpls[seq_id].get());
 
-            const int32_t n = (int32_t) dp.n_past;
-
             const int32_t n_draft = params.n_max;
 
             const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 1);
+            common_speculative_draft_window_plan window_plan;
+            if (!prepare_window(seq_id, dp.n_past, 0, window_plan) ||
+                    window_plan.local_begin + n_block_tokens > window_capacity) {
+                dp.drafting = false;
+                continue;
+            }
+
             i_block_beg[seq_id] = batch.n_tokens;
             n_block    [seq_id] = n_block_tokens;
+            block_local_begin[seq_id] = window_plan.local_begin;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
-                common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, true);
+                common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id,
+                        window_plan.local_begin + i, { seq_id }, true);
             }
         }
 
@@ -1543,6 +1731,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         int ret = llama_decode(ctx_dft, batch);
         if (ret != 0) {
             LOG_WRN("%s: llama_decode returned %d\n", __func__, ret);
+            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+                if (block_local_begin[seq_id] >= 0) {
+                    llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, block_local_begin[seq_id], -1);
+                }
+            }
             return;
         }
 
@@ -1615,11 +1808,106 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }
+
+            awaiting_verification[seq_id] = !result.empty();
+            verify_local_begin[seq_id] = -1;
+            verify_rows[seq_id] = 0;
+        }
+
+        // Noise/mask rows are provisional. The target verification callback
+        // reinjects only the sampled token plus verified proposals, and accept()
+        // then trims rejected rows. Removing the block here prevents private KV
+        // from accumulating duplicate speculative positions across rollovers.
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (block_local_begin[seq_id] >= 0 &&
+                    !llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, block_local_begin[seq_id], -1)) {
+                SPC_ERR("%s failed to remove provisional block for sequence %d at local position %d\n",
+                        common_speculative_type_to_str(type).c_str(), (int) seq_id,
+                        (int) block_local_begin[seq_id]);
+            }
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
-        // noop
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq || !awaiting_verification[seq_id]) {
+            return;
+        }
+
+        if (verify_local_begin[seq_id] < 0 || verify_rows[seq_id] <= 0) {
+            SPC_ERR("%s did not receive a verification feature batch for sequence %d\n",
+                    common_speculative_type_to_str(type).c_str(), (int) seq_id);
+            awaiting_verification[seq_id] = false;
+            return;
+        }
+
+        // The verification batch starts with the target's sampled anchor, then
+        // the proposals. Commit the anchor and the accepted prefix only.
+        const llama_pos n_keep = std::min<llama_pos>(verify_rows[seq_id], (llama_pos) n_accepted + 1);
+        const llama_pos next = verify_local_begin[seq_id] + n_keep;
+        if (!llama_memory_seq_rm(llama_get_memory(params.ctx_dft), seq_id, next, -1)) {
+            SPC_ERR("%s failed to roll back rejected verification rows for sequence %d at local position %d\n",
+                    common_speculative_type_to_str(type).c_str(), (int) seq_id, (int) next);
+        } else {
+            windows[seq_id].next = next;
+        }
+
+        awaiting_verification[seq_id] = false;
+        verify_local_begin[seq_id] = -1;
+        verify_rows[seq_id] = 0;
+    }
+
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return false;
+        }
+        data = common_speculative_draft_window_state_serialize(windows[seq_id]);
+        return true;
+    }
+
+    void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return;
+        }
+
+        common_speculative_draft_window_state restored;
+        auto * mem_dft = llama_get_memory(params.ctx_dft);
+        bool restored_ok = common_speculative_draft_window_state_restore(
+                data, window_capacity, window_reserve, restored);
+        if (restored_ok) {
+            // Prompt and speculative checkpoints can contain provisional or
+            // rejected rows past the saved logical boundary. Never allow those
+            // rows to survive state assignment to another slot.
+            restored_ok = llama_memory_seq_rm(mem_dft, seq_id, restored.next, -1);
+            restored_ok = restored_ok && common_speculative_draft_window_matches_positions(
+                    restored,
+                    llama_memory_seq_pos_min(mem_dft, seq_id),
+                    llama_memory_seq_pos_max(mem_dft, seq_id));
+        }
+        if (!restored_ok) {
+            SPC_WRN("%s discarded contradictory private draft checkpoint for sequence %d\n",
+                    common_speculative_type_to_str(type).c_str(), (int) seq_id);
+            windows[seq_id] = {};
+            llama_memory_seq_rm(mem_dft, seq_id, -1, -1);
+        } else {
+            windows[seq_id] = restored;
+        }
+        awaiting_verification[seq_id] = false;
+        verify_local_begin[seq_id] = -1;
+        verify_rows[seq_id] = 0;
+        media_prefill[seq_id] = {};
+    }
+
+    bool has_private_positions(llama_seq_id /*seq_id*/) const override {
+        return true;
+    }
+
+    bool can_reuse_prefix(llama_seq_id seq_id, llama_pos target_pos) const override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq || target_pos < 0) {
+            return false;
+        }
+        const auto & state = windows[seq_id];
+        return target_pos == 0 ||
+            (target_pos >= state.origin && (int64_t) target_pos <= (int64_t) state.origin + state.next);
     }
 };
 
@@ -2917,6 +3205,114 @@ common_speculative_output_limits common_speculative_get_output_limits(
     };
 }
 
+bool common_speculative_draft_window_plan_make(
+        const common_speculative_draft_window_state & state,
+        llama_pos target_begin,
+        llama_pos n_positions,
+        llama_pos capacity,
+        llama_pos reserve,
+        llama_pos rollover_chunk,
+        common_speculative_draft_window_plan & plan) {
+    plan = {};
+
+    if (target_begin < 0 || n_positions < 0 || capacity <= 0 || reserve < 0 ||
+            reserve >= capacity || rollover_chunk <= 0) {
+        return false;
+    }
+
+    common_speculative_draft_window_state cur = state;
+    if (cur.origin < 0 || cur.next < 0 || cur.next > capacity - reserve) {
+        return false;
+    }
+
+    // A position-zero decode is the unambiguous full-rebuild boundary. Do not
+    // carry a private mapping from the slot's previous request across it.
+    if (target_begin == 0 && (cur.origin != 0 || cur.next != 0)) {
+        plan.reset = true;
+        cur = {};
+    }
+
+    const int64_t absolute_next = (int64_t) cur.origin + cur.next;
+    if (absolute_next > std::numeric_limits<llama_pos>::max() ||
+            target_begin < cur.origin || target_begin > absolute_next) {
+        return false;
+    }
+
+    if (target_begin < absolute_next) {
+        plan.truncate_from = target_begin - cur.origin;
+        cur.next = plan.truncate_from;
+    }
+
+    const llama_pos usable = capacity - reserve;
+    if (n_positions > usable) {
+        return false;
+    }
+
+    const int64_t end_before = (int64_t) cur.next + n_positions;
+    if (end_before > usable) {
+        const llama_pos overflow = (llama_pos) (end_before - usable);
+        llama_pos discard = std::max(overflow, rollover_chunk);
+        const int64_t rounded = ((int64_t) discard + rollover_chunk - 1) / rollover_chunk * rollover_chunk;
+        discard = (llama_pos) std::min<int64_t>(cur.next, rounded);
+        if (discard < overflow) {
+            return false;
+        }
+        plan.discard = discard;
+        cur.origin += discard;
+        cur.next   -= discard;
+    }
+
+    plan.origin      = cur.origin;
+    plan.local_begin = cur.next;
+    plan.local_end   = cur.next + n_positions;
+    return plan.local_end <= usable;
+}
+
+std::vector<uint8_t> common_speculative_draft_window_state_serialize(
+        const common_speculative_draft_window_state & state) {
+    static constexpr uint8_t magic[] = { 'A', 'D', 'W', 1 };
+    std::vector<uint8_t> data(sizeof(magic) + 2*sizeof(llama_pos));
+    std::memcpy(data.data(), magic, sizeof(magic));
+    std::memcpy(data.data() + sizeof(magic), &state.origin, sizeof(llama_pos));
+    std::memcpy(data.data() + sizeof(magic) + sizeof(llama_pos), &state.next, sizeof(llama_pos));
+    return data;
+}
+
+bool common_speculative_draft_window_state_restore(
+        const std::vector<uint8_t> & data,
+        llama_pos capacity,
+        llama_pos reserve,
+        common_speculative_draft_window_state & state) {
+    static constexpr uint8_t magic[] = { 'A', 'D', 'W', 1 };
+    state = {};
+    if (capacity <= 0 || reserve < 0 || reserve >= capacity ||
+            data.size() != sizeof(magic) + 2*sizeof(llama_pos) ||
+            std::memcmp(data.data(), magic, sizeof(magic)) != 0) {
+        return false;
+    }
+
+    common_speculative_draft_window_state restored;
+    std::memcpy(&restored.origin, data.data() + sizeof(magic), sizeof(llama_pos));
+    std::memcpy(&restored.next, data.data() + sizeof(magic) + sizeof(llama_pos), sizeof(llama_pos));
+    if (restored.origin < 0 || restored.next < 0 || restored.next > capacity - reserve ||
+            (int64_t) restored.origin + restored.next > std::numeric_limits<llama_pos>::max()) {
+        return false;
+    }
+
+    state = restored;
+    return true;
+}
+
+bool common_speculative_draft_window_matches_positions(
+        const common_speculative_draft_window_state & state,
+        llama_pos pos_min,
+        llama_pos pos_max) {
+    if (state.next == 0) {
+        return pos_min < 0 && pos_max < 0;
+    }
+    return pos_min == 0 && pos_max == state.next - 1;
+}
+
 // initialization of the speculative decoding system
 //
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq) {
@@ -3149,6 +3545,32 @@ bool common_speculative_requires_media_reprefill(
         }
     }
     return false;
+}
+
+bool common_speculative_has_private_positions(
+        const common_speculative * spec, llama_seq_id seq_id) {
+    if (spec == nullptr || seq_id < 0 || seq_id >= (llama_seq_id) spec->dparams.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < spec->impls.size(); ++i) {
+        if (spec->active[i][seq_id] && spec->impls[i]->has_private_positions(seq_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool common_speculative_can_reuse_prefix(
+        const common_speculative * spec, llama_seq_id seq_id, llama_pos target_pos) {
+    if (spec == nullptr || seq_id < 0 || seq_id >= (llama_seq_id) spec->dparams.size()) {
+        return true;
+    }
+    for (size_t i = 0; i < spec->impls.size(); ++i) {
+        if (spec->active[i][seq_id] && !spec->impls[i]->can_reuse_prefix(seq_id, target_pos)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 common_speculative_draft_params & common_speculative_get_draft_params(

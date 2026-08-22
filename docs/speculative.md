@@ -146,6 +146,28 @@ llama-server -m Qwen3-4B.gguf -md Qwen3-4B-DSpark.gguf \
 
 `--spec-draft-n-max` is clamped to the draft model's trained block size.
 
+Published DFlash and DSpark sidecars can have a much shorter trained context
+than the target model. Atomic keeps that limit—4096 positions per slot for the
+Prism Bonsai DSpark—but does not address the sidecar KV with unbounded target
+positions. Instead, each sequence records the absolute target position mapped
+to draft-local position zero. It discards and RoPE-shifts old draft KV in
+512-position chunks while reserving room for a complete diffusion block. The
+target retains its full context and verifies every proposal, so the private
+window changes draft availability rather than target semantics.
+
+At normal server verbosity, DSpark/DFlash initialization reports the effective
+draft context per slot, K/V cache types, flash-attention state, noise-block
+reserve, and rollover chunk. Each actual rollover reports the old and new
+target-space origin. A healthy long-context run should continue reporting draft
+acceptance after those rollover messages; `failed to find a memory slot` at the
+4096 boundary is a defect, not an expected cutoff.
+
+Prompt and speculative checkpoints store the private origin and local end next
+to the draft KV bytes. If a cached target prefix is older than the retained
+draft window, the server performs a paired position-zero rebuild. Target context
+shift also uses transactional retained-window reprefill for DSpark/DFlash because
+target-absolute erase ranges cannot be applied directly to their private domain.
+
 `--spec-draft-conf-min P` truncates each drafted block at the first position whose predicted
 acceptance (from the draft's confidence head, if present) falls below `P` (default 0 = disabled).
 
@@ -159,6 +181,13 @@ convert the same way.
 See:
 
 - #25173
+
+The private-window rollover, checkpoint mapping, and normal-verbosity runtime
+diagnostics are local Atomic adaptations. DFlash originates in
+[`ggml-org/llama.cpp` PR #22105](https://github.com/ggml-org/llama.cpp/pull/22105),
+DSpark in [`ggml-org/llama.cpp` PR #25173](https://github.com/ggml-org/llama.cpp/pull/25173),
+and the legacy Bonsai Markov implementation in `PrismML-Eng/llama.cpp` commit
+`ba62b7023`.
 
 ### Multi-Token Prediction (`draft-mtp`)
 

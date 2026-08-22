@@ -12,6 +12,18 @@
 // llama_memory_recurrent
 //
 
+inline bool llama_recurrent_has_nonconsecutive_scalar_positions(
+        uint32_t n_pos,
+        llama_pos previous,
+        llama_pos current,
+        uint32_t n_seq_tokens) {
+    // M-RoPE image batches intentionally reuse their temporal coordinate while
+    // x/y advance, then jump to the declared one-dimensional image boundary.
+    // Row count is therefore a valid continuity delta only for scalar RoPE.
+    return n_pos == 1 && previous >= 0 &&
+        current != previous + (llama_pos) n_seq_tokens;
+}
+
 // TODO: extract the cache state used for graph computation into llama_memory_recurrent_context_i
 //       see the implementation of llama_kv_cache_context_i for an example how to do it
 class llama_memory_recurrent : public llama_memory_i {

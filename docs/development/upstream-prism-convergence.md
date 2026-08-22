@@ -67,8 +67,21 @@ accepted by `atoi`.
 
 DSpark sidecars are trained for 4096 positions. Draft context is capped at
 `4096 * n_parallel`, while a smaller explicit context is preserved. The target may
-retain a larger context independently. The configured mask token is parsed
-strictly and must fall inside the draft vocabulary.
+retain a larger context independently. Atomic maps that larger absolute target
+domain into a per-sequence private draft window: old DSpark KV is removed and
+shifted toward local position zero in 512-position chunks while space for a
+complete trained block stays reserved. This preserves the sidecar's trained
+limit without permanently disabling drafting when a target conversation crosses
+position 4096. The configured mask token is parsed strictly and must fall inside
+the draft vocabulary.
+
+The target-to-local origin and committed local end are versioned checkpoint
+state. A prompt prefix outside the retained draft window forces a paired rebuild,
+cache-chunk relocation is disabled for private draft positions, and target
+context shift selects transactional reprefill. Provisional diffusion rows are
+removed immediately after sampling; only target-verified feature rows become
+committed draft KV. These rollover and cache-coordination rules are local Atomic
+adaptations on top of upstream DFlash/DSpark and Prism's legacy implementation.
 
 ### Unified MTP/NextN
 
@@ -111,6 +124,11 @@ Vision context shift keeps two paths:
 - in-place f16/q8 K shift with chunk-aware range erasure and media-boundary snap;
 - transactional retained-window reprefill for TurboQuant and M-RoPE.
 
+DFlash/DSpark always select the reprefill path during a target context shift,
+even for otherwise shiftable Q8 draft KV, because their local positions no
+longer equal target positions after the first rollover. During retained-media
+replay, pooled image features and text both pass through the same mapping.
+
 The coherence bit is semantic state, not a cache optimization hint. It answers a
 specific question: “do the active stateful drafters represent a safe continuation
 of the target's accepted prefix?” Real media does not make the answer false when
@@ -142,11 +160,12 @@ All model runs execute in hidden child processes with redirected logs and timeou
 
 | Target | Configuration | Result |
 |---|---|---|
-| Ternary Bonsai 27B | exact Q2_0-G128 base + DSpark Q4_1 + exact mmproj, CUDA, `-ctk f16 -ctv turbo2`, context reprefill | vision identified Apollo 11; following text returned 42; DSpark accepted 13/16 drafts |
-| Gemma 4 26B-A4B | exact owner target + historical `gemma4_assistant` Q8_0 + exact mmproj + CPU MoE + Turbo KV | returned 42; multimodal model loaded; 2/2 drafts accepted |
-| Qwen 3.6 35B-A3B | exact combined native-MTP GGUF + CPU MoE + embedded `draft-mtp` | returned 42; 2/2 drafts accepted |
+| Ternary Bonsai 27B | exact Q2_0-G128 base + DSpark Q4_1 + exact mmproj, CUDA, target `turbo4`/`turbo3`, draft Q8_0/Q8_0 | a 15,626-token text prompt crossed repeated 4096-position draft-window rollovers and accepted 38/90 drafts; an image answer accepted 86/162; its retained-image 8,283-token follow-up crossed another seven rollovers and accepted 30/126 |
+| Ternary Bonsai context shift | same exact stack, forced 2048 target context, 1,050-token image prompt + 1,400-token generation | transactional reprefill shifted the target context and generation completed; DSpark remained active and accepted 904/1,979 drafts |
+| Gemma 4 26B-A4B | exact owner target + historical `gemma4_assistant` + exact mmproj + CPU MoE + Turbo KV | text returned 42 and vision identified the UI screenshot; both turns accepted 2/2 drafts |
+| Qwen 3.6 35B-A3B | exact combined native-MTP GGUF + matching mmproj + CPU MoE + embedded `draft-mtp` | text returned 42 and vision identified the UI screenshot; text accepted 2/2 drafts and vision accepted 2/6 |
 | CUDA operator | Bonsai 576x512, separate F16 K / Q8_0 V | numerical comparison passed |
-| CUDA operator | 576x512 Q8_0 K/V, V subview of K | existing MLA controls passed |
+| CUDA operator | 576x512 Q8_0 K/V, V subview of K | numerical comparison passed |
 | Full Windows CUDA build | complete tool suite, `sm_120` | built successfully; 48/48 CTest tests passed |
 | Full Windows CPU build | complete tool suite | built successfully; 48/48 CTest tests passed |
 | Maintained shell launchers | `bash -n` | all passed |
@@ -159,6 +178,21 @@ The focused regression tests are:
 - `test-server-spec-state`: policy selection plus supported/unsupported media
   coherence transitions;
 - `test-backend-ops`: separate adaptive Bonsai KV layout plus existing MLA layout.
+
+The owner-machine helper starts each exact stack as a hidden child, redirects both
+streams, enforces a readiness deadline, and reports its PID and log paths as JSON:
+
+```powershell
+.\scripts\start-hidden-atomic-server.ps1 -Stack Ternary -ContextSize 32768 -Port 8097
+.\scripts\start-hidden-atomic-server.ps1 -Stack Gemma   -ContextSize 8192  -Port 8098
+.\scripts\start-hidden-atomic-server.ps1 -Stack Qwen    -ContextSize 8192  -Port 8099
+```
+
+The helper intentionally uses the owner's exact filenames under
+`C:\Program Files\llamacpp`; it is regression infrastructure, not a portable
+model-discovery wrapper. On success the caller owns the returned process and must
+stop it after requests finish. On load failure or readiness timeout the helper
+terminates its own child so a failed run cannot strand VRAM.
 
 ## Maintained launch syntax
 
