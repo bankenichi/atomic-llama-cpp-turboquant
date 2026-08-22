@@ -1437,11 +1437,14 @@ enum legacy_q2_layout {
     LEGACY_Q2_GROUP64,
     LEGACY_Q2_GROUP128,
     LEGACY_Q2_MIXED,
+    LEGACY_Q2_AMBIGUOUS,
 };
 
 static std::vector<uint8_t> make_legacy_q2_type42_gguf(legacy_q2_layout layout) {
     constexpr uint32_t alignment = GGUF_DEFAULT_ALIGNMENT;
-    constexpr int64_t q2_ne = 2048; // padded g64/g128 sizes differ by exactly one alignment unit
+    const int64_t q2_ne = layout == LEGACY_Q2_AMBIGUOUS
+        ? 128  // both encodings occupy one 32-byte-aligned span
+        : 2048; // padded g64/g128 sizes differ by exactly one alignment unit
     constexpr int64_t tail_ne = 32;
 
     const bool mixed = layout == LEGACY_Q2_MIXED;
@@ -1519,7 +1522,61 @@ static std::pair<int, int> test_legacy_q2_type42_normalization() {
     run(LEGACY_Q2_GROUP64,   GGML_TYPE_Q2_0,      true);
     run(LEGACY_Q2_GROUP128,  GGML_TYPE_Q2_0_G128, true);
     run(LEGACY_Q2_MIXED,     GGML_TYPE_Q2_0,      false);
+    // Raw type 42 is standardized as group-64. With no decisive physical span
+    // or trustworthy metadata discriminator, ambiguity must retain that meaning.
+    run(LEGACY_Q2_AMBIGUOUS, GGML_TYPE_Q2_0,      true);
     return std::make_pair(npass, ntest);
+}
+
+static std::pair<int, int> test_legacy_private_type_normalization() {
+    constexpr uint32_t alignment = GGUF_DEFAULT_ALIGNMENT;
+    const std::vector<ggml_type> physical_types = {
+        GGML_TYPE_TURBO3_0,
+        GGML_TYPE_TURBO4_0,
+        GGML_TYPE_TQ3_1S,
+        GGML_TYPE_TQ4_1S,
+    };
+
+    std::vector<uint64_t> offsets(physical_types.size());
+    uint64_t data_size = 0;
+    for (size_t i = 0; i < physical_types.size(); ++i) {
+        offsets[i] = data_size;
+        const int64_t ne = i < 2 ? 128 : 32;
+        data_size += GGML_PAD(ggml_row_size(physical_types[i], ne), alignment);
+    }
+
+    std::vector<uint8_t> data;
+    helper_append(data, GGUF_MAGIC, 4);
+    helper_append(data, uint32_t(GGUF_VERSION));
+    helper_append(data, uint64_t(physical_types.size()));
+    helper_append(data, uint64_t(0));
+
+    for (size_t i = 0; i < physical_types.size(); ++i) {
+        const std::string name = "legacy_private_" + std::to_string(i);
+        helper_append(data, uint64_t(name.size()));
+        helper_append(data, name.data(), name.size());
+        helper_append(data, uint32_t(1));
+        helper_append(data, int64_t(i < 2 ? 128 : 32));
+        helper_append(data, int32_t(43 + i));
+        helper_append(data, offsets[i]);
+    }
+
+    data.resize(GGML_PAD(data.size(), alignment), 0);
+    data.resize(data.size() + data_size, 0);
+
+    const gguf_init_params params = {
+        /*.no_alloc =*/ true,
+        /*.ctx      =*/ nullptr,
+    };
+    gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
+    bool ok = ctx != nullptr;
+    for (size_t i = 0; ok && i < physical_types.size(); ++i) {
+        ok = gguf_get_tensor_type(ctx, i) == physical_types[i];
+    }
+
+    printf("%s: %s\n", __func__, ok ? "OK" : "FAIL");
+    gguf_free(ctx);
+    return { ok ? 1 : 0, 1 };
 }
 
 int main(int argc, char ** argv) {
@@ -1544,6 +1601,11 @@ int main(int argc, char ** argv) {
     }
     {
         std::pair<int, int> result = test_legacy_q2_type42_normalization();
+        npass += result.first;
+        ntest += result.second;
+    }
+    {
+        std::pair<int, int> result = test_legacy_private_type_normalization();
         npass += result.first;
         ntest += result.second;
     }

@@ -436,8 +436,10 @@ extern "C" {
         GGML_TYPE_Q2_0_G128 = 142,
 
         // Personal-fork private types. Keep these out of the upstream/Prism GGUF
-        // type range; legacy files that used the old 42-46 IDs are remapped by
-        // the model loader after their physical layout has been validated.
+        // type range. Legacy on-disk IDs 43-46 are normalized by the GGUF reader.
+        // Old ID 42 is intentionally not claimed here: it collides byte-for-byte
+        // with Prism's group-128 Q2_0 and Turbo2 was a runtime KV format, not a
+        // persisted weight format.
         GGML_TYPE_TURBO2_0 = 240, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
         GGML_TYPE_TURBO3_0 = 241, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
         GGML_TYPE_TURBO4_0 = 242, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant

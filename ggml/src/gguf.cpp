@@ -465,6 +465,21 @@ static bool gguf_set_tensor_layout(gguf_tensor_info & info, ggml_type type) {
     return true;
 }
 
+static ggml_type gguf_normalize_legacy_private_type(int32_t raw_type) {
+    // This fork historically occupied the then-unused GGUF IDs 43-46. They are
+    // unambiguous today and must remain readable after moving the private types
+    // out of the upstream namespace. ID 42 is deliberately handled separately:
+    // old Turbo2 and Prism Q2_0_G128 have the same 128-value/34-byte physical
+    // layout, and Turbo2 was only ever intended for runtime KV caches.
+    switch (raw_type) {
+        case 43: return GGML_TYPE_TURBO3_0;
+        case 44: return GGML_TYPE_TURBO4_0;
+        case 45: return GGML_TYPE_TQ3_1S;
+        case 46: return GGML_TYPE_TQ4_1S;
+        default: return static_cast<ggml_type>(raw_type);
+    }
+}
+
 // Prism's original ternary GGUFs were published while raw tensor type 42 meant
 // group-128 Q2_0 in that fork. Upstream later assigned 42 to its incompatible
 // group-64 Q2_0. Modern files use our collision-free type 142, but the published
@@ -472,8 +487,10 @@ static bool gguf_set_tensor_layout(gguf_tensor_info & info, ggml_type type) {
 //
 // Infer the legacy encoding from the physical tensor spans recorded in the GGUF
 // offset table. A single decisive tensor selects the layout for every raw type-42
-// tensor in the shard; contradictory evidence is rejected instead of silently
-// interpreting part of a model with the wrong block format.
+// tensor in the shard; contradictory evidence is rejected. If every span is
+// ambiguous, retain the standardized group-64 meaning of raw type 42. There is
+// no reliable metadata discriminator in the published legacy files, so treating
+// ambiguity as legacy group-128 would corrupt valid upstream GGUFs.
 static bool gguf_normalize_legacy_q2_0_type42(gguf_context & ctx, uint64_t data_bytes_available) {
     enum class physical_layout {
         unknown,
@@ -539,7 +556,11 @@ static bool gguf_normalize_legacy_q2_0_type42(gguf_context & ctx, uint64_t data_
         layout = observed;
     }
 
-    if (n_type42 == 0 || layout != physical_layout::group128) {
+    if (n_type42 == 0) {
+        return true;
+    }
+
+    if (layout != physical_layout::group128) {
         return true;
     }
 
@@ -851,7 +872,14 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
 
         // tensor type
         {
-            ok = ok && gr.read(info.t.type);
+            int32_t raw_type = 0;
+            ok = ok && gr.read(raw_type);
+            info.t.type = gguf_normalize_legacy_private_type(raw_type);
+
+            if (ok && static_cast<int32_t>(info.t.type) != raw_type) {
+                GGML_LOG_WARN("%s: normalized legacy private tensor '%s' type %d to %d (%s)\n",
+                        __func__, info.t.name, raw_type, (int) info.t.type, ggml_type_name(info.t.type));
+            }
 
             // check that tensor type is within defined range
             if (info.t.type < 0 || info.t.type >= GGML_TYPE_COUNT) {

@@ -411,6 +411,14 @@ enum llm_kv {
     LLM_KV_DENSE_2_FEAT_OUT,
     LLM_KV_DENSE_3_FEAT_IN,
     LLM_KV_DENSE_3_FEAT_OUT,
+
+    // Legacy Gemma 4 assistant metadata namespace.
+    LLM_KV_GEMMA4_ASSISTANT_N_CENTROIDS,
+    LLM_KV_GEMMA4_ASSISTANT_CENTROID_TOP_K,
+    LLM_KV_GEMMA4_ASSISTANT_N_EMBD_BACKBONE,
+    LLM_KV_GEMMA4_ASSISTANT_ATTENTION_K_EQ_V,
+    LLM_KV_GEMMA4_ASSISTANT_USE_ORDERED_EMBEDDINGS,
+    LLM_KV_GEMMA4_ASSISTANT_REQUIRES_TARGET_ARCH,
 };
 
 enum llm_tensor {
@@ -656,6 +664,11 @@ enum llm_tensor {
     LLM_TENSOR_NEXTN_HNORM,
     LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
     LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
+    // Legacy Gemma 4 assistant namespace used by this fork's deployed MTP head.
+    LLM_TENSOR_MTP_PRE_PROJECTION,
+    LLM_TENSOR_MTP_POST_PROJECTION,
+    LLM_TENSOR_MTP_CENTROIDS,
+    LLM_TENSOR_MTP_TOKEN_ORDERING,
     LLM_TENSOR_MASKED_EMBD_CENTROIDS,
     LLM_TENSOR_MASKED_EMBD_ORDERING,
     LLM_TENSOR_FC,
@@ -684,10 +697,11 @@ enum llm_tensor_layer {
 };
 
 struct LLM_KV {
-    LLM_KV(llm_arch arch, const char * suffix = nullptr);
+    LLM_KV(llm_arch arch, const char * suffix = nullptr, const char * arch_name_override = nullptr);
 
     llm_arch arch;
     const char * suffix;
+    std::string arch_name_override;
 
     std::string operator()(llm_kv kv) const;
 };

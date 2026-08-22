@@ -1710,7 +1710,12 @@ size_t server_prompt_cache::n_tokens() const {
     return res;
 }
 
-server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft) {
+server_prompt_cache_state * server_prompt_cache::alloc(
+        const server_prompt & prompt,
+        size_t state_size_tgt,
+        size_t state_size_dft,
+        bool draft_synchronized,
+        std::vector<uint8_t> data_spec) {
     // first check if the current state is contained fully in the cache
     for (auto it = states.begin(); it != states.end(); ++it) {
         const int cur_lcp_len = it->prompt.tokens.get_common_prefix(prompt.tokens);
@@ -1727,7 +1732,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         checkpoints_size += ckpt.size();
     }
 
-    const size_t state_size_new = state_size_tgt + state_size_dft + checkpoints_size;
+    const size_t state_size_new = state_size_tgt + state_size_dft + data_spec.size() + checkpoints_size;
 
     // skip over-limit entries to avoid disturbing the cache
     if (limit_size > 0 && state_size_new > limit_size) {
@@ -1786,13 +1791,21 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         /*.data   =*/ {
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
+            /*.spec =*/ std::move(data_spec),
         },
+        /*.draft_synchronized =*/ draft_synchronized,
     });
 
     return &states.back();
 }
 
-bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
+server_prompt_cache_load_result server_prompt_cache::load(
+        server_prompt & prompt,
+        const server_tokens & tokens_new,
+        llama_context * ctx_tgt,
+        llama_context * ctx_dft,
+        int32_t id_slot) {
+    server_prompt_cache_load_result result;
     const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
 
     float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f; // empty slot: any cache entry wins
@@ -1830,16 +1843,17 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
         {
             auto & data = it_best->data.main;
 
-            const size_t size = data.size();
-            const size_t n = llama_state_seq_set_data_ext(ctx_tgt, data.data(), size, id_slot, 0);
-            if (n != size) {
-                SRV_ERR("failed to restore state with size %zu\n", size);
+            if (!data.empty()) {
+                const size_t size = data.size();
+                const size_t n = llama_state_seq_set_data_ext(ctx_tgt, data.data(), size, id_slot, 0);
+                if (n != size) {
+                    SRV_ERR("failed to restore state with size %zu\n", size);
 
-                return false;
+                    result.success = false;
+                    return result;
+                }
+
             }
-
-            data.clear();
-            data.shrink_to_fit();
         }
 
         {
@@ -1853,20 +1867,23 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
                 if (n != size) {
                     SRV_WRN("failed to restore state with size %zu\n", size);
 
-                    return false;
+                    result.success = false;
+                    return result;
                 }
 
-                data.clear();
-                data.shrink_to_fit();
             }
         }
+
+        result.restored = true;
+        result.draft_synchronized = it_best->draft_synchronized;
+        result.data_spec = std::move(it_best->data.spec);
 
         prompt = std::move(it_best->prompt);
 
         states.erase(it_best);
     }
 
-    return true;
+    return result;
 }
 
 void server_prompt_cache::update() {

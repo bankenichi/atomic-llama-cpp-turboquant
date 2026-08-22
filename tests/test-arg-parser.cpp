@@ -5,6 +5,7 @@
 #include "speculative.h"
 
 #include <limits>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -42,6 +43,65 @@ static void test(void) {
         const auto draft = common_base_params_to_speculative(base);
         assert(draft.n_outputs_max == 4);
         assert(draft.n_outputs_max_per_seq == 1);
+    }
+
+    {
+        common_params base;
+        base.n_ctx = 131072;
+        base.n_parallel = 1;
+        base.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK };
+
+        const auto draft = common_base_params_to_speculative(base);
+        assert(draft.n_ctx == 4096);
+
+        base.n_parallel = 3;
+        const auto parallel_draft = common_base_params_to_speculative(base);
+        assert(parallel_draft.n_ctx == 3 * 4096);
+
+        base.n_ctx = 2048;
+        const auto small_draft = common_base_params_to_speculative(base);
+        assert(small_draft.n_ctx == 2048);
+    }
+
+    {
+        assert(common_speculative_parse_metadata_int("mask", "127", 0, 127) == 127);
+        assert(common_speculative_parse_metadata_int("block", "16  ", 1, 4096) == 16);
+
+        const char * invalid_values[] = {
+            "-1",
+            "12junk",
+            "999999999999999999999",
+            "128",
+        };
+        for (const char * value : invalid_values) {
+            bool threw = false;
+            try {
+                (void) common_speculative_parse_metadata_int("mask", value, 0, 127);
+            } catch (const std::runtime_error &) {
+                threw = true;
+            }
+            assert(threw);
+        }
+    }
+
+    {
+        llama_pos pos = 7;
+        std::vector<float> boundary = { 1.0f, 2.0f, 3.0f };
+        std::vector<uint8_t> encoded(sizeof(pos) + boundary.size() * sizeof(float));
+        std::memcpy(encoded.data(), &pos, sizeof(pos));
+        std::memcpy(encoded.data() + sizeof(pos), boundary.data(), boundary.size() * sizeof(float));
+
+        llama_pos restored_pos = -1;
+        std::vector<float> restored;
+        assert(common_speculative_restore_boundary_state(encoded, 3, restored_pos, restored));
+        assert(restored_pos == 7);
+        assert(restored == boundary);
+
+        // A cache entry with no pending boundary must replace, not preserve,
+        // a nonempty boundary inherited from the destination slot.
+        assert(!common_speculative_restore_boundary_state({}, 3, restored_pos, restored));
+        assert(restored_pos == -1);
+        assert(restored == std::vector<float>({ 0.0f, 0.0f, 0.0f }));
     }
 
     printf("test-arg-parser: make sure there is no duplicated arguments in any examples\n\n");

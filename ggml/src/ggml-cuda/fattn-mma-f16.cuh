@@ -1912,7 +1912,14 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     const int warp_size_host = ggml_cuda_info().devices[ctx.device].warp_size;
     const int nwarps         = nthreads / warp_size_host;
 
-    constexpr bool V_is_K_view = DKQ == 576; // Guaranteed by the kernel selection logic in fattn.cu
+    // 576x512 is commonly DeepSeek MLA, where V is a sub-view of K, but it is
+    // also Bonsai's native attention geometry. Adaptive TurboQuant can give
+    // Bonsai a separate F16 K / Q8_0 V cache, so select the matching compiled
+    // stride specialization from the graph instead of inferring it from DKQ.
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    const bool V_is_K_view = V->view_src &&
+            (V->view_src == K || (V->view_src == K->view_src && V->view_offs == K->view_offs));
 
     const size_t nbytes_shared_KV_1stage = nbatch_fa            * std::max(nbatch_K2 + 4,  nbatch_V2 + 4) * sizeof(half2);
     const size_t nbytes_shared_KV_2stage = nbatch_fa            *         (nbatch_K2 + 4 + nbatch_V2 + 4) * sizeof(half2);
@@ -1937,24 +1944,44 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     fattn_kernel_t fattn_kernel;
     if (logit_softcap == 0.0f) {
         constexpr bool use_logit_softcap = false;
-        fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view>;
+        if constexpr (DKQ == 576) {
+            fattn_kernel = V_is_K_view
+                ? flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, true>
+                : flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+        } else {
+            fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+        }
 
 #if !defined(GGML_USE_MUSA)
-        static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {false};
-        if (!shared_memory_limit_raised[id]) {
+        static bool shared_memory_limit_raised_view[GGML_CUDA_MAX_DEVICES] = {false};
+        static bool shared_memory_limit_raised_separate[GGML_CUDA_MAX_DEVICES] = {false};
+        bool & shared_memory_limit_raised = V_is_K_view
+            ? shared_memory_limit_raised_view[id]
+            : shared_memory_limit_raised_separate[id];
+        if (!shared_memory_limit_raised) {
             CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-            shared_memory_limit_raised[id] = true;
+            shared_memory_limit_raised = true;
         }
 #endif // !defined(GGML_USE_MUSA)
     } else {
         constexpr bool use_logit_softcap = true;
-        fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view>;
+        if constexpr (DKQ == 576) {
+            fattn_kernel = V_is_K_view
+                ? flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, true>
+                : flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+        } else {
+            fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, false>;
+        }
 
 #if !defined(GGML_USE_MUSA)
-        static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {false};
-        if (!shared_memory_limit_raised[id]) {
+        static bool shared_memory_limit_raised_view[GGML_CUDA_MAX_DEVICES] = {false};
+        static bool shared_memory_limit_raised_separate[GGML_CUDA_MAX_DEVICES] = {false};
+        bool & shared_memory_limit_raised = V_is_K_view
+            ? shared_memory_limit_raised_view[id]
+            : shared_memory_limit_raised_separate[id];
+        if (!shared_memory_limit_raised) {
             CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-            shared_memory_limit_raised[id] = true;
+            shared_memory_limit_raised = true;
         }
 #endif // !defined(GGML_USE_MUSA)
     }

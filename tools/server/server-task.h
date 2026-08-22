@@ -589,15 +589,17 @@ struct server_prompt {
 struct server_prompt_data {
     std::vector<uint8_t> main;
     std::vector<uint8_t> drft;
+    std::vector<uint8_t> spec;
 
     size_t size() const {
-        return main.size() + drft.size();
+        return main.size() + drft.size() + spec.size();
     }
 };
 
 struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
+    bool draft_synchronized = false;
 
     size_t size() const {
         size_t res = data.size();
@@ -608,6 +610,13 @@ struct server_prompt_cache_state {
 
         return res;
     }
+};
+
+struct server_prompt_cache_load_result {
+    bool success = true;
+    bool restored = false;
+    bool draft_synchronized = false;
+    std::vector<uint8_t> data_spec;
 };
 
 struct server_prompt_cache {
@@ -628,9 +637,19 @@ struct server_prompt_cache {
 
     size_t n_tokens() const;
 
-    server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
+    server_prompt_cache_state * alloc(
+            const server_prompt & prompt,
+            size_t state_size_main,
+            size_t state_size_drft,
+            bool draft_synchronized,
+            std::vector<uint8_t> data_spec);
 
-    bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+    server_prompt_cache_load_result load(
+            server_prompt & prompt,
+            const server_tokens & tokens_new,
+            llama_context * ctx_tgt,
+            llama_context * ctx_dft,
+            int32_t id_slot);
 
     void update();
 };

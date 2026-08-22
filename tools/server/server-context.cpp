@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "server-spec-state.h"
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-http.h"
@@ -207,6 +208,7 @@ struct server_slot {
 
     // speculative decoding
     common_speculative * spec;
+    server_spec_context_state spec_context_state;
 
     llama_tokens spec_draft;
     llama_tokens spec_prompt;
@@ -265,7 +267,18 @@ struct server_slot {
         SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB)\n",
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0));
 
-        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft);
+        std::vector<uint8_t> data_spec;
+        const bool draft_synchronized = spec && spec_context_state.is_synchronized();
+        if (draft_synchronized) {
+            common_speculative_get_state(spec, id, data_spec);
+        }
+
+        auto * cur = prompt_cache.alloc(
+                prompt,
+                cur_size_tgt,
+                cur_size_dft,
+                draft_synchronized,
+                std::move(data_spec));
         if (cur == nullptr) {
             return false;
         }
@@ -279,18 +292,30 @@ struct server_slot {
     }
 
     bool prompt_load(server_prompt_cache & prompt_cache, const server_tokens & tokens) {
-        bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
-        if (!res) {
+        auto res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
+        if (!res.success) {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
+        } else if (spec) {
+            spec_context_state.restore_from_cache(res.restored, res.draft_synchronized);
+            if (res.restored) {
+                // Empty means "no optional implementation state" and must be
+                // applied too, otherwise the destination slot can retain a
+                // boundary from the request it previously served.
+                common_speculative_set_state(spec, id, res.data_spec);
+            }
         }
 
-        return res;
+        return res.success;
     }
 
     void prompt_clear() {
         SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
 
         mem.seq_rm(id, -1, -1);
+
+        if (spec) {
+            spec_context_state.mark_synchronized();
+        }
 
         prompt.clear();
     }
@@ -695,6 +720,7 @@ struct server_slot {
         other.stats = stats;
 
         other.prompt = prompt.clone();
+        other.spec_context_state = spec_context_state;
         other.init_sampler();
     }
 };
@@ -3205,6 +3231,13 @@ private:
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
 
+                        // A multimodal request advances only the target context. If a
+                        // later text request lands on the same slot, discard any target
+                        // cache hit until the target and draft have been rebuilt from
+                        // position zero together.
+                        const bool force_spec_rebuild = spec &&
+                                slot.spec_context_state.begin_request(input_tokens.has_media());
+
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
                             SLT_WRN(slot, "%s", "empty prompt - releasing slot\n");
@@ -3328,6 +3361,16 @@ private:
                             } else {
                                 // if we don't cache the prompt, we have to remove all previous tokens
                                 n_past = 0;
+                            }
+
+                            if (force_spec_rebuild) {
+                                SLT_INF(slot, "%s", "forcing full prompt rebuild to resynchronize target and draft contexts\n");
+                                n_past = 0;
+                                slot.prompt.checkpoints.clear();
+                                // The common memory wrapper below clears both contexts
+                                // at position zero. Keep the slot invalid until the
+                                // first rebuilt text batch has actually succeeded in
+                                // both contexts.
                             }
 
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
@@ -3799,6 +3842,19 @@ private:
 
                 // TODO: handle error
                 throw std::runtime_error("failed to process speculative batch");
+            }
+
+            // common_speculative_process() has now mirrored every sequence in
+            // this text-only batch. Mark only the participating slots: a later
+            // decode failure or an unbatched slot must remain invalid and force
+            // another full rebuild on its next request.
+            for (int32_t i = 0; i < batch_view.n_tokens; ++i) {
+                for (int32_t j = 0; j < batch_view.n_seq_id[i]; ++j) {
+                    const llama_seq_id seq_id = batch_view.seq_id[i][j];
+                    if (seq_id >= 0 && seq_id < (llama_seq_id) slots.size()) {
+                        slots[seq_id].spec_context_state.mark_synchronized();
+                    }
+                }
             }
         }
 

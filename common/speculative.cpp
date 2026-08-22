@@ -13,7 +13,10 @@
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
 
 #include <algorithm>
+#include <cerrno>
 #include <cassert>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -325,7 +328,7 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
                 for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                     SPC_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
                             seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
-                            common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                            common_token_to_piece(params.ctx_tgt, cur_p->data[k].id).c_str());
                 }
 
                 // add drafted token for each sequence
@@ -787,7 +790,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
                 for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                     SPC_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
                             seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
-                            common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                            common_token_to_piece(params.ctx_tgt, cur_p->data[k].id).c_str());
                 }
 
                 const llama_token id = cur_p->data[0].id;
@@ -891,16 +894,8 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
         }
-        if (data.size() != sizeof(llama_pos) + (size_t) n_embd_dec * sizeof(float)) {
-            return;
-        }
-
-        llama_pos pos = -1;
-        std::memcpy(&pos, data.data(), sizeof(llama_pos));
-
-        pending_pos_last[seq_id] = pos;
-        pending_g_last[seq_id].resize(n_embd_dec);
-        std::memcpy(pending_g_last[seq_id].data(), data.data() + sizeof(llama_pos), (size_t) n_embd_dec * sizeof(float));
+        common_speculative_restore_boundary_state(
+                data, n_embd_dec, pending_pos_last[seq_id], pending_g_last[seq_id]);
     }
 };
 
@@ -958,26 +953,48 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         // Modern DFlash and the original Prism DSpark exporter use different
         // metadata namespaces for the same block-diffusion runtime contract.
+        auto get_int_metadata = [&](const char * key, int64_t min_value, int64_t max_value, int64_t & value) {
+            char buf[64] = {};
+            if (llama_model_meta_val_str(model_dft, key, buf, sizeof(buf)) < 0) {
+                return false;
+            }
+
+            value = common_speculative_parse_metadata_int(key, buf, min_value, max_value);
+            return true;
+        };
+
         block_size = 16;
         {
-            char buf[32] = {};
-            if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0 ||
-                llama_model_meta_val_str(model_dft, "dspark.dspark.block_size", buf, sizeof(buf)) >= 0) {
-                block_size = std::atoi(buf);
+            int64_t parsed_block_size = block_size;
+            if (get_int_metadata("dflash.block_size", 1, 4096, parsed_block_size) ||
+                get_int_metadata("dspark.dspark.block_size", 1, 4096, parsed_block_size)) {
+                block_size = (int32_t) parsed_block_size;
             }
+            char buf[32] = {};
             if (llama_model_meta_val_str(model_dft, "dflash.sample_from_anchor", buf, sizeof(buf)) >= 0) {
                 sample_from_anchor = std::strcmp(buf, "true") == 0;
             }
         }
-        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
+        const llama_vocab * vocab_dft = llama_model_get_vocab(model_dft);
+        const int32_t n_vocab_dft = llama_vocab_n_tokens(vocab_dft);
+        if (n_vocab_dft <= 0) {
+            throw std::runtime_error("DSpark draft model has an empty vocabulary");
+        }
+
+        mask_token_id = llama_vocab_mask(vocab_dft);
         if (mask_token_id == LLAMA_TOKEN_NULL) {
-            char buf[32] = {};
-            if (llama_model_meta_val_str(model_dft, "dspark.dspark.mask_token_id", buf, sizeof(buf)) >= 0) {
-                mask_token_id = (llama_token) std::atoi(buf);
+            int64_t parsed_mask_token = 0;
+            if (get_int_metadata("dspark.dspark.mask_token_id", 0, n_vocab_dft - 1, parsed_mask_token)) {
+                mask_token_id = (llama_token) parsed_mask_token;
             }
         }
         if (mask_token_id == LLAMA_TOKEN_NULL) {
             throw std::runtime_error("DSpark draft model has no mask token id");
+        }
+        if (mask_token_id < 0 || mask_token_id >= n_vocab_dft) {
+            throw std::runtime_error(string_format(
+                    "DSpark mask token id %d is outside the draft vocabulary [0, %d)",
+                    mask_token_id, n_vocab_dft));
         }
 
         LOG_INF("%s: adding speculative implementation '%s'\n", __func__, common_speculative_type_to_str(type).c_str());
@@ -1244,7 +1261,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                         LOG_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
                                 seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
-                                common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                                common_token_to_piece(params.ctx_tgt, cur_p->data[k].id).c_str());
                     }
 
                     const llama_token id = cur_p->data[0].id;
@@ -1263,7 +1280,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                         LOG_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
                                 seq_id, k, i - 1, cur_p->data[k].id, cur_p->data[k].p,
-                                common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                                common_token_to_piece(params.ctx_tgt, cur_p->data[k].id).c_str());
                     }
 
                     const llama_token id = cur_p->data[0].id;
@@ -1637,7 +1654,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                     SPC_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
                             seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
-                            common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                            common_token_to_piece(params.ctx_tgt, cur_p->data[k].id).c_str());
                 }
 
                 // add drafted token for each sequence
@@ -2263,6 +2280,11 @@ std::vector<common_speculative_type> common_speculative_types_from_gguf(const st
     }
 
     const std::string arch = gguf_get_val_str(gguf_ctx.get(), arch_id);
+    if (arch == "gemma4-assistant" || arch == "gemma4_assistant") {
+        SPC_INF("auto-detected speculative type 'draft-mtp' from Gemma assistant architecture '%s'\n", arch.c_str());
+        return { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+    }
+
     if (arch != "dflash" && arch != "dspark") {
         const uint32_t block_count = gguf_get_val_u32(gguf_ctx.get(), gguf_find_key(gguf_ctx.get(), (arch + ".block_count").c_str()));
 
@@ -2331,6 +2353,10 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
 
 common_params common_base_params_to_speculative(const common_params & params) {
     const bool has_draft = params.speculative.has_dft();
+    const bool has_dspark = std::find(
+            params.speculative.types.begin(),
+            params.speculative.types.end(),
+            COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != params.speculative.types.end();
 
     const auto & params_spec = params.speculative.draft;
     common_params result = params;
@@ -2351,6 +2377,19 @@ common_params common_base_params_to_speculative(const common_params & params) {
     result.cache_type_v  = params_spec.cache_type_v;
     result.n_outputs_max = params.n_parallel;
     result.n_outputs_max_per_seq = 1;
+
+    if (has_dspark) {
+        // Published DSpark sidecars are trained for 4096 positions. The target
+        // may use a much larger context, but allocating or addressing the draft
+        // beyond its trained window is both wasteful and unsafe. n_ctx is shared
+        // across sequences, so preserve the full 4096 positions per parallel slot.
+        constexpr int32_t dspark_n_ctx_per_seq = 4096;
+        const int64_t cap64 = (int64_t) dspark_n_ctx_per_seq * std::max(1, params.n_parallel);
+        const int32_t cap = (int32_t) std::min<int64_t>(cap64, INT32_MAX);
+        if (result.n_ctx == 0 || result.n_ctx > cap) {
+            result.n_ctx = cap;
+        }
+    }
 
     // dflash/dspark decode the whole noise block in a single pass and sample every block position on the backend
     // TODO: refactor such properties to be announced by the speculative types
@@ -2456,6 +2495,39 @@ llama_context * common_speculative_init_result::context() {
 
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt) {
     return std::make_unique<common_speculative_init_result>(params, model_tgt, ctx_tgt);
+}
+
+int64_t common_speculative_parse_metadata_int(
+        const char * key, const char * value, int64_t min_value, int64_t max_value) {
+    errno = 0;
+    char * end = nullptr;
+    const long long parsed = std::strtoll(value, &end, 10);
+    while (end && std::isspace(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (errno == ERANGE || end == value || (end && *end != '\0') || parsed < min_value || parsed > max_value) {
+        throw std::runtime_error(string_format(
+                "DSpark metadata '%s' must be an integer in [%lld, %lld], got '%s'",
+                key, (long long) min_value, (long long) max_value, value));
+    }
+    return parsed;
+}
+
+bool common_speculative_restore_boundary_state(
+        const std::vector<uint8_t> & data,
+        int32_t n_embd,
+        llama_pos & pos,
+        std::vector<float> & values) {
+    pos = -1;
+    values.assign(std::max(0, n_embd), 0.0f);
+
+    if (n_embd < 0 || data.size() != sizeof(llama_pos) + (size_t) n_embd * sizeof(float)) {
+        return false;
+    }
+
+    std::memcpy(&pos, data.data(), sizeof(llama_pos));
+    std::memcpy(values.data(), data.data() + sizeof(llama_pos), (size_t) n_embd * sizeof(float));
+    return true;
 }
 
 common_speculative_output_limits common_speculative_get_output_limits(

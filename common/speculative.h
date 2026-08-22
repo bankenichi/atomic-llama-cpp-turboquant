@@ -37,6 +37,20 @@ struct common_speculative_output_limits {
 common_speculative_output_limits common_speculative_get_output_limits(
         int32_t n_batch, int32_t n_parallel, int32_t n_draft);
 
+// Strict integer parser shared by speculative metadata loaders and tests.
+// Throws for empty, partial, overflowing, or out-of-range values.
+int64_t common_speculative_parse_metadata_int(
+        const char * key, const char * value, int64_t min_value, int64_t max_value);
+
+// Restores the optional Eagle3 deferred-boundary payload. Empty/invalid data
+// explicitly clears the destination so cache restoration cannot retain state
+// from the previously assigned slot.
+bool common_speculative_restore_boundary_state(
+        const std::vector<uint8_t> & data,
+        int32_t n_embd,
+        llama_pos & pos,
+        std::vector<float> & values);
+
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq);
 
 void common_speculative_free(common_speculative * spec);

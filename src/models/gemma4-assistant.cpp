@@ -11,7 +11,24 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
 
     hparams.f_attention_scale = 1.0f;
 
-    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
+    const bool legacy_mtp = ml.get_arch_name() == "gemma4_assistant";
+    if (legacy_mtp) {
+        uint32_t n_embd_backbone = 0;
+        ml.get_key(LLM_KV_GEMMA4_ASSISTANT_N_EMBD_BACKBONE, n_embd_backbone);
+        hparams.n_embd_inp_impl = n_embd_backbone;
+        hparams.n_embd_out_impl = n_embd_backbone;
+
+        ml.get_key(LLM_KV_GEMMA4_ASSISTANT_N_CENTROIDS,           hparams.n_centroids,           false);
+        ml.get_key(LLM_KV_GEMMA4_ASSISTANT_CENTROID_TOP_K,         hparams.centroid_top_k,         false);
+        ml.get_key(LLM_KV_GEMMA4_ASSISTANT_ATTENTION_K_EQ_V,       hparams.attention_k_eq_v,       false);
+        ml.get_key(LLM_KV_GEMMA4_ASSISTANT_USE_ORDERED_EMBEDDINGS, hparams.use_ordered_embeddings, false);
+    }
+
+    if (!ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false) && legacy_mtp) {
+        // The original assistant format used block_count as the MTP depth and
+        // predates the generic nextn_predict_layers metadata key.
+        hparams.n_layer_nextn = hparams.n_layer_all;
+    }
     GGML_ASSERT(hparams.n_layer_nextn == hparams.n_layer_all && "n_layer_nextn must be == n_layer_impl");
 
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,           hparams.rope_freq_base_train_swa, false);
@@ -21,8 +38,10 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_SWA,   hparams.n_embd_head_v_swa);
 }
 
-void llama_model_gemma4_assistant::load_arch_tensors(llama_model_loader &) {
+void llama_model_gemma4_assistant::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
+
+    const bool legacy_mtp = ml.get_arch_name() == "gemma4_assistant";
 
     if (n_embd_head_k != n_embd_head_v) {
         throw std::runtime_error("Gemma 4 assistant requires n_embd_head_k == n_embd_head_v");
@@ -39,11 +58,11 @@ void llama_model_gemma4_assistant::load_arch_tensors(llama_model_loader &) {
 
     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
 
-    create_tensor(tn(LLM_TENSOR_MASKED_EMBD_CENTROIDS, "weight"), {}, TENSOR_NOT_REQUIRED);
-    create_tensor(tn(LLM_TENSOR_MASKED_EMBD_ORDERING),  {}, TENSOR_NOT_REQUIRED);
+    create_tensor(tn(legacy_mtp ? LLM_TENSOR_MTP_CENTROIDS : LLM_TENSOR_MASKED_EMBD_CENTROIDS, "weight"), {}, TENSOR_NOT_REQUIRED);
+    create_tensor(tn(legacy_mtp ? LLM_TENSOR_MTP_TOKEN_ORDERING : LLM_TENSOR_MASKED_EMBD_ORDERING),  {}, TENSOR_NOT_REQUIRED);
 
     const int64_t n_embd_backbone = hparams.n_embd_inp();
-    nextn_proj_post = create_tensor(tn(LLM_TENSOR_NEXTN_PROJ_POST, "weight"), { n_embd, n_embd_backbone }, 0);
+    nextn_proj_post = create_tensor(tn(legacy_mtp ? LLM_TENSOR_MTP_POST_PROJECTION : LLM_TENSOR_NEXTN_PROJ_POST, "weight"), { n_embd, n_embd_backbone }, 0);
 
     int rope_freqs_flag = 0;
 
@@ -55,7 +74,11 @@ void llama_model_gemma4_assistant::load_arch_tensors(llama_model_loader &) {
         const int64_t n_ff        = hparams.n_ff(i);
 
         if (i == 0) {
-            nextn_proj_pre = create_tensor(tn(LLM_TENSOR_NEXTN_PROJ_PRE, "weight", i), { 2*n_embd_backbone, n_embd }, 0);
+            if (legacy_mtp) {
+                nextn_proj_pre = create_tensor(tn(LLM_TENSOR_MTP_PRE_PROJECTION, "weight"), { 2*n_embd_backbone, n_embd }, 0);
+            } else {
+                nextn_proj_pre = create_tensor(tn(LLM_TENSOR_NEXTN_PROJ_PRE, "weight", i), { 2*n_embd_backbone, n_embd }, 0);
+            }
         }
 
         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), { n_embd }, 0);

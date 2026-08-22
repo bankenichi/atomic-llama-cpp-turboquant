@@ -355,6 +355,13 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_DENSE_3_FEAT_IN,        "%s.dense_3_feat_in"  },
     { LLM_KV_DENSE_3_FEAT_OUT,       "%s.dense_3_feat_out" },
 
+    { LLM_KV_GEMMA4_ASSISTANT_N_CENTROIDS,           "%s.n_centroids"            },
+    { LLM_KV_GEMMA4_ASSISTANT_CENTROID_TOP_K,         "%s.centroid_top_k"         },
+    { LLM_KV_GEMMA4_ASSISTANT_N_EMBD_BACKBONE,        "%s.n_embd_backbone"        },
+    { LLM_KV_GEMMA4_ASSISTANT_ATTENTION_K_EQ_V,       "%s.attention.k_eq_v"       },
+    { LLM_KV_GEMMA4_ASSISTANT_USE_ORDERED_EMBEDDINGS, "%s.use_ordered_embeddings" },
+    { LLM_KV_GEMMA4_ASSISTANT_REQUIRES_TARGET_ARCH,   "%s.requires_target_arch"   },
+
     { LLM_KV_TOKENIZER_MODEL,                    "tokenizer.ggml.model"                    },
     { LLM_KV_TOKENIZER_PRE,                      "tokenizer.ggml.pre"                      },
     { LLM_KV_TOKENIZER_LIST,                     "tokenizer.ggml.tokens"                   },
@@ -543,6 +550,10 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_NEXTN_HNORM,                            "blk.%d.nextn.hnorm" },
     { LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,                 "blk.%d.nextn.shared_head_head" },
     { LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,                 "blk.%d.nextn.shared_head_norm" },
+    { LLM_TENSOR_MTP_PRE_PROJECTION,                     "mtp.pre_projection" },
+    { LLM_TENSOR_MTP_POST_PROJECTION,                    "mtp.post_projection" },
+    { LLM_TENSOR_MTP_CENTROIDS,                          "mtp.centroids" },
+    { LLM_TENSOR_MTP_TOKEN_ORDERING,                     "mtp.token_ordering" },
     { LLM_TENSOR_ATTN_SUB_NORM,                          "blk.%d.attn_sub_norm" },
     { LLM_TENSOR_FFN_SUB_NORM,                           "blk.%d.ffn_sub_norm" },
     { LLM_TENSOR_DEC_OUTPUT_NORM,                        "dec.output_norm" },
@@ -916,6 +927,10 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_NEXTN_HNORM,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_MTP_PRE_PROJECTION,         {LLM_TENSOR_LAYER_INPUT,     GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_MTP_POST_PROJECTION,        {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_MTP_CENTROIDS,              {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_MTP_TOKEN_ORDERING,         {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_GET_ROWS}},
     // Nemotron 3 Super
     // latent projections feed ggml_mul_mat, the buft probe must use MUL_MAT to keep them on GPU
     {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
@@ -940,10 +955,12 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_DSPARK_LEGACY_LOG_SNR_FC2,  {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
 };
 
-LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
+LLM_KV::LLM_KV(llm_arch arch, const char * suffix, const char * arch_name_override) :
+        arch(arch), suffix(suffix), arch_name_override(arch_name_override ? arch_name_override : "") {}
 
 std::string LLM_KV::operator()(llm_kv kv) const {
-    std::string name = ::format(LLM_KV_NAMES.at(kv), LLM_ARCH_NAMES.at(arch));
+    const char * arch_name = arch_name_override.empty() ? LLM_ARCH_NAMES.at(arch) : arch_name_override.c_str();
+    std::string name = ::format(LLM_KV_NAMES.at(kv), arch_name);
 
     if (suffix != nullptr) {
         name += ".";
@@ -988,6 +1005,13 @@ const char * llm_arch_name(llm_arch arch) {
 }
 
 llm_arch llm_arch_from_string(const std::string & name) {
+    // Private Gemma 4 assistant GGUFs predate the upstream spelling change
+    // from an underscore to a hyphen. Keep those files loadable while emitting
+    // the canonical spelling for newly converted models.
+    if (name == "gemma4_assistant") {
+        return LLM_ARCH_GEMMA4_ASSISTANT;
+    }
+
     for (const auto & kv : LLM_ARCH_NAMES) { // NOLINT
         if (kv.second == name) {
             return kv.first;
