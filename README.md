@@ -36,16 +36,20 @@ request
   |
   +-- image/audio/video ------> mmproj + target model
                                       |
-                                      +-- draft marked out of sync
-
-next text request on that slot: clear/rebuild target + draft together, then resume drafting
+                                      +-- target features / media boundary
+                                                  |
+                                      media-aware speculative policy
 ```
 
 Speculative output is never committed on trust. The drafter proposes tokens and
 the target verifies them, so a rejected proposal changes performance, not model
-semantics. Vision is deliberately target-only for the current drafters. The server
-therefore tracks whether each slot's target and draft represent the same prefix;
-this state travels with the secondary prompt cache and survives cache misses.
+semantics. Vision and speculation can operate in the same request. DSpark and
+DFlash pool target-derived image features into the image's actual context-position
+span; EAGLE3, MTP/NextN, and a standalone draft model resume through an explicit
+post-media boundary; n-gram implementations remain independent of model KV. The
+server tracks eligibility per implementation and sequence, isolates a failed
+drafter without aborting the target answer, and carries coherent state with the
+secondary prompt cache.
 
 There are three supported draft layouts:
 
@@ -63,9 +67,10 @@ There are three supported draft layouts:
   4096-position draft-context limit per parallel slot.
 - Unified `draft-mtp` decoding for Gemma assistant sidecars and embedded Qwen
   NextN heads.
-- Vision-aware speculative lifecycle: text turns draft while an mmproj is loaded;
-  real media turns cannot leave a stale draft context; the next text turn rebuilds
-  target and draft together.
+- Media-aware speculation for DSpark/DFlash, EAGLE3, MTP/NextN, standalone draft
+  models, and every maintained n-gram mode. Image answers and full-history
+  follow-ups can accept drafts without treating a loaded mmproj or retained image
+  as a permanent disable signal.
 - Vision context shifting for f16/q8 KV plus transactional reprefill for TurboQuant
   and M-RoPE layouts.
 - TurboQuant KV (`turbo2`, `turbo3`, `turbo4`) and TQ3/TQ4 weight formats on CPU
@@ -206,12 +211,12 @@ build\bin\Release\llama-server.exe `
   --spec-type draft-mtp `
   --spec-draft-n-max 2 `
   -ngl 999 -ngld 999 --n-cpu-moe 28 `
-  -ctk turbo4 -ctv turbo3 -ctkd f16 -ctvd f16 `
+  -ctk turbo4 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 `
   -fa on --context-shift --reasoning off
 ```
 
 This is the owner's normal Qwen cache configuration: target K/V use
-`turbo4`/`turbo3`, while the small embedded draft context remains explicitly f16.
+`turbo4`/`turbo3`, while the small embedded draft context uses lossless q8_0/q8_0.
 All-f16 target KV is retained as a diagnostic profile, but is not the daily-driver
 default. The PowerShell wrapper command is `./run-gemma.ps1 -Qwen`; portable shell
 launchers are [`scripts/run-qwen36-27b-nextn-server.sh`](scripts/run-qwen36-27b-nextn-server.sh)
@@ -255,11 +260,13 @@ Invoke-RestMethod -Method Post `
   -Body $body
 ```
 
-Then send one real image request and another unrelated text request on the same
-server. The post-media text request is the important cache-coherence check: logs
-should show a full prompt rebuild before speculative drafting resumes. Frontends
-such as SillyTavern should use the OpenAI-compatible Chat Completion endpoint at
-`/v1`; that lets the server apply the model's own template and media markers.
+Then send one real image request and a follow-up that resends the complete history,
+including the original image, on the same server. Both timing blocks should report
+draft statistics when the selected implementation proposes tokens. A full rebuild
+is expected only when the slot or restored speculative state is not coherent; a
+retained image alone is not a reason to rebuild or disable drafting. Frontends such
+as SillyTavern should use the OpenAI-compatible Chat Completion endpoint at `/v1`;
+that lets the server apply the model's own template and media markers.
 
 ## Performance switches
 
@@ -329,6 +336,8 @@ for preserving attribution.
 - [`MTP.md`](MTP.md) — current Gemma/Qwen `draft-mtp` behavior.
 - [`NEXTN.md`](NEXTN.md) — Qwen embedded NextN operation.
 - [`docs/speculative.md`](docs/speculative.md) — generic speculative CLI.
+- [`docs/development/media-aware-speculative-decoding.md`](docs/development/media-aware-speculative-decoding.md)
+  — how every speculative implementation handles image and retained-image turns.
 - [`docs/development/context-shift-with-vision.md`](docs/development/context-shift-with-vision.md)
   — vision/KV shifting and reprefill.
 - [`docs/development/performance-features.md`](docs/development/performance-features.md)

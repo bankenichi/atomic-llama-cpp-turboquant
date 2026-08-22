@@ -84,16 +84,27 @@ normalized to the current internal architecture.
 ### Vision and server caches
 
 An mmproj being loaded means the server is media-capable, not that every request
-contains media. Draft and prime gates use `has_media()`.
+contains media. `has_media()` detects real media, while the speculative coordinator
+chooses a policy for each implementation and sequence:
 
-A media request advances only the target context for implementations that cannot
-consume the media representation. `server_spec_context_state` records this. The
-next text request cannot reuse a target-only cache prefix: it forces `n_past = 0`,
-clears checkpoints, removes both sequence memories, and rebuilds them together.
-The secondary RAM prompt cache stores the coherence bit and optional speculative
-implementation state alongside target/draft bytes. Cache misses are explicit
-no-ops, so an unrelated text request cannot erase media invalidation; cache hits
-restore the saved entry's state rather than inferring coherence from the new task.
+- DFlash/DSpark accumulate target-derived encoder features and mean-pool M-RoPE
+  image rows into the image's actual one-dimensional context-position span.
+- EAGLE3 keeps the final target-derived image feature at a compact private
+  boundary. Its provisional draft KV is removed in that same private domain before
+  target verification rebuilds committed rows.
+- MTP/NextN consumes the target hidden boundary supported by the loaded model;
+  image embeddings are not fabricated as tokens.
+- draft-simple reconstructs serializable text in a compact draft-only position
+  domain and never decodes a foreign mmproj vector.
+- n-gram implementations remain stateless and use real text-token history.
+
+This makes a retained image in a full-history client request compatible with
+continued drafting. `server_spec_context_state` still records whether cacheable
+state is coherent. If one implementation fails, it alone becomes ineligible; the
+already-decoded target verification batch is finalized and the target answer
+continues. The secondary RAM prompt cache stores the coherence bit and optional
+boundary state alongside target/draft bytes. Cache misses are explicit no-ops and
+cache hits restore the saved entry rather than inferring state from a new task.
 
 Vision context shift keeps two paths:
 
@@ -101,11 +112,11 @@ Vision context shift keeps two paths:
 - transactional retained-window reprefill for TurboQuant and M-RoPE.
 
 The coherence bit is semantic state, not a cache optimization hint. It answers a
-specific question: “does the selected drafter represent the same accepted prefix
-as the target?” A request with real media sets it false; loading an mmproj does not.
-It becomes true only after a successful text batch is processed by the speculative
-implementation. This timing prevents a failed draft decode from being recorded as
-synchronized merely because the target prefill succeeded.
+specific question: “do the active stateful drafters represent a safe continuation
+of the target's accepted prefix?” Real media does not make the answer false when
+the active policy consumed or explicitly rebased that media boundary. It becomes
+false only when a required implementation is skipped, fails, or cannot restore its
+state. This timing prevents target prefill success from hiding a failed drafter.
 
 The secondary prompt cache distinguishes three outcomes—restore failure, cache
 miss, and cache hit—because they have different state transitions. A miss preserves
@@ -145,8 +156,8 @@ The focused regression tests are:
 - `test-gguf`: group-64, group-128, mixed, ambiguous raw type 42, and legacy
   private type normalization;
 - `test-arg-parser`: DSpark per-slot context cap;
-- `test-server-spec-state`: media invalidation, paired rebuild, and secondary-cache
-  miss/hit coherence transfer;
+- `test-server-spec-state`: policy selection plus supported/unsupported media
+  coherence transitions;
 - `test-backend-ops`: separate adaptive Bonsai KV layout plus existing MLA layout.
 
 ## Maintained launch syntax

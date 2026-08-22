@@ -193,14 +193,16 @@ Loading `--mmproj` does not disable MTP. The server distinguishes multimodal
 capability from a request that actually contains media:
 
 - Text request with mmproj loaded: target and draft run normally.
-- Request containing image/audio/video data: target handles the media; the draft
-  context is marked invalid rather than pretending it consumed the media tokens.
-- Next text request on that slot: cached prompt reuse is forced to position zero,
-  both memories are cleared, and target plus draft are rebuilt together.
+- Request containing image/audio/video data: the target handles the projector
+  embeddings, while MTP consumes only the target hidden rows defined by its
+  architecture. It never invents token IDs for image rows.
+- Full-history follow-up containing the same image: the coherent cached prefix and
+  MTP boundary are reused, and drafting continues during the follow-up.
 
-This is enforced by `server_spec_context_state` and unit-tested independently.
-It prevents a target prompt-cache hit from being paired with an empty or stale
-draft cache after a media turn.
+This is enforced by the per-implementation media policy in
+`common/speculative.cpp` and the slot coherence state in
+`server_spec_context_state`. If a bridge cannot process a batch, only that
+implementation is invalidated; the target answer remains valid.
 
 Secondary RAM prompt-cache entries save four related pieces as one logical unit:
 
@@ -209,7 +211,7 @@ Secondary RAM prompt-cache entries save four related pieces as one logical unit:
 - the `draft_synchronized` coherence bit;
 - optional implementation state such as an Eagle/NextN deferred boundary row.
 
-A cache miss is a no-op: it must not clear a media-triggered invalidation. A cache
+A cache miss is a no-op: it must not manufacture synchronization. A cache
 hit restores the entry's own coherence bit. Even an empty optional-state payload is
 applied, because empty means “clear the previous destination boundary,” not “leave
 whatever state this slot happened to have.” Failed restores leave the cache entry
@@ -251,8 +253,9 @@ about the technique.
   the conversion recorded the wrong target backbone width.
 - **Zero acceptance with successful load:** check draft precision, prompt template,
   and whether hidden-state rows are aligned at the accepted boundary.
-- **Failure only after media:** look for the forced paired rebuild. Do not disable
-  mmproj globally; the bug is slot/cache coherence.
+- **Failure only after media:** inspect the implementation policy, boundary state,
+  and draft/target positions. Do not disable mmproj globally; a retained image is
+  expected to coexist with MTP.
 - **Slower than target-only:** reduce draft depth, compare KV formats, and account
   for the VRAM cost of the assistant before changing correctness code.
 
@@ -262,9 +265,10 @@ Before changing MTP, model loading, server cache reuse, or vision code, validate
 
 1. Exact historical Gemma target + assistant + mmproj loads.
 2. A text request returns correctly and logs nonzero draft acceptance.
-3. A real image request succeeds on the same server.
-4. A following cached text request rebuilds target and draft safely.
-5. Embedded Qwen NextN returns correctly with nonzero accepted drafts.
+3. A real image answer records nonzero accepted drafts on the same server.
+4. A full-history follow-up resends the image, reuses a coherent prefix, and
+   records accepted drafts without a forced media-only invalidation.
+5. Embedded Qwen NextN satisfies the same image-answer and retained-history gate.
 
 The convergence acceptance matrix is recorded in
 [`docs/development/upstream-prism-convergence.md`](docs/development/upstream-prism-convergence.md).

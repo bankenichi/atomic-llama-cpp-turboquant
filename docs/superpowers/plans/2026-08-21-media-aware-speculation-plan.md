@@ -4,6 +4,9 @@ Date: 2026-08-21
 
 Design: `docs/superpowers/specs/2026-08-21-media-aware-speculation-design.md`
 
+Status: implementation and exact-model media gates complete; full CPU/CUDA test
+matrix, documentation review, and publication remain.
+
 ## Goal
 
 Replace the request-wide media veto with per-implementation, per-sequence media
@@ -204,5 +207,8 @@ Files:
 
 Do not declare completion for a DSpark-only exception. Completion requires an
 explicit tested policy for every maintained speculative type, no permanent
-full-history media disablement, exact target-token parity, coherent cache/shift
-state, and passing exact Bonsai, Gemma, and Qwen vision regressions.
+full-history media disablement, target verification of every committed proposal,
+coherent cache/shift state, and passing exact Bonsai, Gemma, and Qwen vision
+regressions. Bit-for-bit greedy parity is diagnostic rather than a hard gate when
+the same quantized model also shows a reproduced text-only batched-verification
+near-tie; see the design's correctness-oracle note.

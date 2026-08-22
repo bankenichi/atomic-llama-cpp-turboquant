@@ -4,6 +4,52 @@ llama.cpp supports speculative decoding, a technique that can significantly acce
 
 [Speculative decoding](https://en.wikipedia.org/wiki/Transformer_(deep_learning)#Speculative_decoding) leverages the fact that computing n tokens in a batch (as in prompt processing) is more efficient than computing n sequentially (as in response generation). By generating draft tokens quickly and then verifying them with the target model in a single batch, this approach can achieve substantial speedups when the draft predictions are frequently correct.
 
+## Vision and retained-media conversations in Atomic
+
+Atomic does not disable speculation merely because `--mmproj` is loaded, and it
+does not apply a blanket veto when a client resends an earlier image in every
+OpenAI-compatible request. Media handling belongs to each speculative algorithm:
+
+| Type | Media policy | What the draft actually receives |
+|---|---|---|
+| `draft-dflash`, `draft-dspark` | embedding prefill | Target-layer features pooled from encoder rows into the image's real context-position span |
+| `draft-eagle3` | compact post-media boundary | The final target-derived EAGLE feature for the image boundary; no fabricated image token |
+| `draft-mtp` | target-feature/post-media bridge | Target hidden rows supported by the loaded MTP architecture; image embeddings are never passed off as token IDs |
+| `draft-simple` | compact text projection | Serializable text history in a private draft position domain; foreign mmproj vectors are omitted |
+| all `ngram-*` modes | stateless | Real text-token history only; no model KV or expanded image rows |
+
+Every proposal is still verified by the multimodal target. Eligibility is tracked
+per implementation and server sequence, so a failing drafter is detached without
+aborting the target answer or disabling a healthy n-gram fallback. A pending target
+verification batch is finalized even if its producer fails while mirroring that
+batch; this prevents stale proposal bookkeeping from leaking into the next decode.
+
+The practical regression is a two-request full-history conversation: first ask a
+question about an image, then resend the image, first answer, and a follow-up. When
+the chosen drafter finds useful proposals, both timing blocks report `draft
+acceptance`. The retained image is not itself a cache-invalidating event.
+
+Greedy speculative output is mathematically target-verified, but bit-for-bit text
+identity with a sequential target-only run is not promised by quantized kernels.
+Batched verification changes floating-point reduction order and can flip a
+near-tied greedy token even on a text-only request. Treat invalid positions,
+decode failures, stale boundaries, or unverified tokens as correctness defects;
+do not confuse a coherent near-tie difference with media-state corruption.
+
+### Provenance
+
+The base EAGLE3 deferred-boundary implementation comes from
+[`ggml-org/llama.cpp` PR #18039](https://github.com/ggml-org/llama.cpp/pull/18039)
+and its later upstream fixes, including commits `88a39274e` and `f87067841` in
+this repository. Upstream DSpark arrived through
+[`ggml-org/llama.cpp` PR #25173](https://github.com/ggml-org/llama.cpp/pull/25173)
+at commit `84075273c`; Prism's earlier DSpark/Markov implementation and CUDA work
+remain credited at commit `ba62b7023`. Biogenic Ooze's Atomic commit `ead60fb4f`
+first established the fork's mmproj/speculation coexistence direction. The
+per-policy coordinator, M-RoPE image-feature pooling, compact EAGLE/draft-simple
+position domains, and failure isolation described above are local Atomic
+adaptations built on those sources.
+
 ## Implementations
 
 The `llama-server` application supports several implementations of speculative decoding. An implementation with draft model can be mixed with an implementation without draft model.

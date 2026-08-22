@@ -45,7 +45,7 @@ llama-server `
   --spec-draft-n-max 2 `
   --spec-draft-n-min 0 `
   -ngl 999 -ngld 999 `
-  -ctk f16 -ctv f16 -ctkd f16 -ctvd f16 `
+  -ctk turbo4 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 `
   -fa on --context-shift
 ```
 
@@ -144,20 +144,19 @@ target cost, so the same acceptance ratio can yield less throughput improvement.
 
 ## Vision
 
-An mmproj may remain loaded while NextN handles text turns. A request with real
-media invalidates draft synchronization, and the next text request performs a full
-paired rebuild before speculative generation resumes. This is the same lifecycle
-used by Gemma MTP and DSpark; see [`MTP.md`](MTP.md).
+An mmproj may remain loaded while NextN handles both text and image-conditioned
+turns. Target-produced hidden rows bridge the multimodal prefill into the embedded
+MTP context, so a full-history client can resend the original image without
+permanently disabling drafting. See [`MTP.md`](MTP.md) for the shared driver.
 
 The distinction is between *media capability* and *media in this request*:
 
 - merely loading `--mmproj` must not disable NextN on text turns;
-- a request containing media bypasses the drafter because its embeddings cannot be
-  represented as ordinary draft tokens;
-- the slot remains marked unsynchronized until a later text prefill succeeds in
-  both target and draft contexts;
-- prompt-cache hits restore the coherence stored with the entry, while misses leave
-  the current invalidation unchanged.
+- image embeddings remain target-owned and are never represented as fake tokens;
+- the MTP context captures the target hidden boundary it actually consumes;
+- image answers and retained-image follow-ups may both produce accepted drafts;
+- prompt-cache hits restore their recorded boundary and coherence, while misses do
+  not invent either.
 
 ## Model and artifact provenance
 
@@ -194,8 +193,9 @@ Acceptance is unexpectedly low
   head loses predictive accuracy.
 
 Text fails only after an image turn
-: Confirm that logs show a forced full prompt rebuild. This is a coherence problem,
-  not evidence that vision and NextN must run in separate servers.
+: Inspect the media bridge and cached MTP boundary. A retained image should not
+  force target-only operation or require vision and NextN to run in separate
+  servers.
 
 Performance regresses despite high acceptance
 : Draft compute or memory placement is too expensive. Test `--spec-draft-n-max 1`
@@ -214,8 +214,9 @@ The broader regression contract is:
 1. Combined GGUF detection selects `draft-mtp` without a second model path.
 2. A deterministic text prompt returns the expected target answer and records
    accepted drafts.
-3. A real image request succeeds with the matching mmproj.
-4. The next unrelated text request rebuilds the paired contexts and resumes drafts.
+3. A real image answer succeeds with the matching mmproj and accepted drafts.
+4. A full-history follow-up resends the image and continues accepting drafts from
+   a coherent cached prefix.
 5. Context shifting and prompt-cache save/load do not retain a stale boundary row.
 6. Target-only mode remains available as the correctness/performance baseline.
 

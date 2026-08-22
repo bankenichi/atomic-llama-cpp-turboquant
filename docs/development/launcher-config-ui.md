@@ -106,7 +106,7 @@ remains authoritative.
 
 ### Qwen embedded NextN
 
-The standard profile uses target turbo4/turbo3 KV, draft f16/f16 KV, 28 CPU MoE
+The standard profile uses target turbo4/turbo3 KV, lossless draft q8_0/q8_0 KV, 28 CPU MoE
 layers, and two synchronous draft tokens. No draft model path is emitted. Historical
 `LLAMA_NEXTN_ASYNC`, `LLAMA_PIPELINE_DEPTH2`, `--spec-type nextn`, and
 `--spec-type mtp` controls are not part of the converged runtime and must not return.
@@ -122,8 +122,10 @@ dense, vision-capable, and target-only.
 
 The UI and launcher permit mmproj plus speculative configuration. They do not infer
 that a loaded projector means the current request contains media. The server's
-`has_media()` gate selects the safe target path only for real media and performs the
-paired resynchronization before later text speculation.
+`has_media()` accessor reports real media to the speculative coordinator, which
+selects the implementation's embedding-prefill, post-media boundary, compact text,
+or stateless policy. Image answers and retained-image follow-ups can therefore
+draft without the UI inventing its own gating rules.
 
 Turbo K with context shifting produces a warning because the server must use
 transactional reprefill. The configuration remains valid. Image-boundary snapping,

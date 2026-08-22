@@ -163,10 +163,10 @@ effective-command output, and documentation.
 - cancellation-safe stop/restart through the server process boundary.
 
 The runtime's media-aware behavior is preserved: loading an mmproj does not disable
-text speculation, real media turns use the safe target path where required, and
-later text turns may resume speculation only after the runtime has restored coherent
-draft state. The UI explains and reports this behavior; it does not attempt to
-implement speculative gating itself.
+text speculation, and real media is handled by the selected speculative
+implementation's policy. Image answers and retained-image follow-ups may accept
+drafts while the target remains authoritative. The UI explains and reports this
+behavior; it does not attempt to implement speculative gating itself.
 
 ### Vision and context management
 

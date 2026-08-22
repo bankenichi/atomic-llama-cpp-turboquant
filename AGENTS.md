@@ -20,9 +20,11 @@ while keeping the repository mergeable with future upstream releases.
 
 1. **Real-media gating** (`server_tokens::has_media`) keeps speculation enabled for
    text requests merely because an mmproj is loaded.
-2. **Speculative media resynchronization** (`server-spec-state.h`) invalidates the
-   draft context on a real-media request and forces a paired position-zero rebuild
-   before later text speculation.
+2. **Media-aware speculative coordination** (`common/speculative.cpp` and
+   `server-spec-state.h`) selects a policy per implementation and sequence.
+   DFlash/DSpark consume pooled target image features, EAGLE/MTP and draft-simple
+   use explicit private position domains, and n-grams remain stateless. A retained
+   image in full-history requests must never become a permanent speculation veto.
 3. **Modern MTP contexts** use `LLAMA_CONTEXT_TYPE_MTP`, which selects the
    decoder-MTP graph through the normal context path. Draft-context construction
    in `common/speculative.cpp` keeps `op_offload = false`; preserve that setting
@@ -110,6 +112,8 @@ changes, require:
 - `MTP.md`, `NEXTN.md`, `docs/speculative.md` — speculative operation and CLI.
 - `docs/development/upstream-prism-convergence.md` — architecture and acceptance.
 - `docs/development/context-shift-with-vision.md` — KV/media shift behavior.
+- `docs/development/media-aware-speculative-decoding.md` — image-answer drafting,
+  private position domains, failure isolation, validation, and provenance.
 - `docs/development/mtp-cpumoe-vision-fixes.md` — historical Gemma root causes.
 - `docs/development/gemma4-12b-vision.md` — template/encoder-free vision history.
 - `docs/development/performance-features.md` — runtime performance switches.
