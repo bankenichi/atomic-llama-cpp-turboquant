@@ -2499,6 +2499,10 @@ common_speculative_init_result_ptr common_speculative_init_from_params(common_pa
 
 int64_t common_speculative_parse_metadata_int(
         const char * key, const char * value, int64_t min_value, int64_t max_value) {
+    // GGUF metadata reaches this compatibility path as text. `atoi()` would
+    // silently accept prefixes such as "16junk", map malformed strings to zero,
+    // and overflow without a usable diagnostic, all of which can corrupt DSpark
+    // batch geometry or select an out-of-vocabulary mask token.
     errno = 0;
     char * end = nullptr;
     const long long parsed = std::strtoll(value, &end, 10);
@@ -2518,6 +2522,9 @@ bool common_speculative_restore_boundary_state(
         int32_t n_embd,
         llama_pos & pos,
         std::vector<float> & values) {
+    // Clear first even when validation fails. Cache assignment can move a slot
+    // from an entry with a deferred boundary to one without it; retaining the
+    // destination's previous values would splice two unrelated requests.
     pos = -1;
     values.assign(std::max(0, n_embd), 0.0f);
 

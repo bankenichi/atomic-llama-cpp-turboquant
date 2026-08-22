@@ -1840,6 +1840,9 @@ server_prompt_cache_load_result server_prompt_cache::load(
     if (it_best != states.end()) {
         SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
 
+        // Do not clear or move any entry-owned payload until every context has
+        // restored successfully. Target succeeds before draft; consuming target
+        // bytes early would leave a failed entry present but impossible to retry.
         {
             auto & data = it_best->data.main;
 
@@ -1878,6 +1881,8 @@ server_prompt_cache_load_result server_prompt_cache::load(
         result.draft_synchronized = it_best->draft_synchronized;
         result.data_spec = std::move(it_best->data.spec);
 
+        // Ownership transfers only after the target and optional draft restores
+        // have both completed. From this point the cache entry is single-use.
         prompt = std::move(it_best->prompt);
 
         states.erase(it_best);

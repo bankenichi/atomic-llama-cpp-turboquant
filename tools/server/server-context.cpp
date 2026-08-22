@@ -268,6 +268,9 @@ struct server_slot {
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0));
 
         std::vector<uint8_t> data_spec;
+        // Only a coherent target/draft pair can export implementation boundary
+        // state. Saving a target-only media state as coherent would allow a
+        // later cache hit to skip the required paired rebuild.
         const bool draft_synchronized = spec && spec_context_state.is_synchronized();
         if (draft_synchronized) {
             common_speculative_get_state(spec, id, data_spec);

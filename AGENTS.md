@@ -118,7 +118,15 @@ changes, require:
 ## Conventions
 
 - Keep `LICENSE` and `NOTICE.md` intact.
+- Preserve imported commit authorship and name the source repository/branch or PR
+  when porting code. Distinguish direct ports from local adaptations; provenance is
+  a correctness requirement for this fork, not optional release polish.
 - Document nontrivial private changes under `docs/development/`.
+- Comment non-obvious invariants at the implementation site, especially file-format
+  collision rules, cross-context cache state, model compatibility aliases, and
+  backend layout assumptions. Explain *why* the branch exists and what regression
+  a tempting simplification would reintroduce; avoid comments that merely restate
+  the next line.
 - Maintain only the single Windows-CUDA CI workflow.
 - Preserve unrelated owner changes in a dirty worktree.
 - Create and publish a backup branch/tag before pushing a major convergence to

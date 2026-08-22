@@ -11,6 +11,10 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
 
     hparams.f_attention_scale = 1.0f;
 
+    // The loader normalizes the legacy architecture enum to the modern Gemma
+    // MTP implementation, but deliberately preserves the raw GGUF prefix.
+    // Metadata and tensor namespaces changed together, so architecture dispatch
+    // alone is not enough to make old assistant files compatible.
     const bool legacy_mtp = ml.get_arch_name() == "gemma4_assistant";
     if (legacy_mtp) {
         uint32_t n_embd_backbone = 0;
@@ -41,6 +45,8 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
 void llama_model_gemma4_assistant::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
+    // Keep this decision tied to the raw on-disk architecture name. Inferring it
+    // from optional tensors is ambiguous for dense heads and mixed conversions.
     const bool legacy_mtp = ml.get_arch_name() == "gemma4_assistant";
 
     if (n_embd_head_k != n_embd_head_v) {

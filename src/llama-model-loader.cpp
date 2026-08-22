@@ -572,6 +572,9 @@ llama_model_loader::llama_model_loader(
         }
 
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+        // `gemma4_assistant` dispatches to the modern assistant model class, but
+        // its metadata keys still use the legacy raw prefix. Preserve that prefix
+        // in LLM_KV instead of formatting keys with `gemma4-assistant`.
         llm_kv = LLM_KV(llm_arch_from_string(arch_name), nullptr,
                 arch_name == "gemma4_assistant" ? arch_name.c_str() : nullptr);
 
@@ -685,6 +688,8 @@ llama_model_loader::llama_model_loader(
         }
 
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+        // Keep the raw legacy prefix for file-pointer loads for the same reason as
+        // the path-based constructor above: enum normalization must not rename KV.
         llm_kv = LLM_KV(llm_arch_from_string(arch_name), nullptr,
                 arch_name == "gemma4_assistant" ? arch_name.c_str() : nullptr);
 
@@ -704,6 +709,7 @@ llama_model_loader::llama_model_loader(
         }
     } else {
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+        // Metadata-only loaders must resolve the identical legacy namespace too.
         llm_kv = LLM_KV(llm_arch_from_string(arch_name), nullptr,
                 arch_name == "gemma4_assistant" ? arch_name.c_str() : nullptr);
     }

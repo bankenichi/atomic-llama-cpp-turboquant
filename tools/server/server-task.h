@@ -587,6 +587,10 @@ struct server_prompt {
 };
 
 struct server_prompt_data {
+    // A prompt-cache entry is atomic across these three payloads. `spec` is
+    // implementation-owned state (for example a deferred hidden boundary), not
+    // another llama_context snapshot. Empty `spec` is meaningful on restore: it
+    // clears any boundary left by the slot's previous request.
     std::vector<uint8_t> main;
     std::vector<uint8_t> drft;
     std::vector<uint8_t> spec;
@@ -599,6 +603,11 @@ struct server_prompt_data {
 struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
+
+    // True only when the cached draft memory represents the same accepted
+    // prefix as `main`. Do not derive this from the presence of `drft`: shared-
+    // memory MTP may have no independent draft bytes, while a media turn can
+    // leave allocated draft bytes semantically stale.
     bool draft_synchronized = false;
 
     size_t size() const {
@@ -613,6 +622,9 @@ struct server_prompt_cache_state {
 };
 
 struct server_prompt_cache_load_result {
+    // `success`, `restored`, and a miss are intentionally distinct. A miss is a
+    // no-op for slot coherence; a failure reports a partial restore attempt; a
+    // hit transfers the cache entry's coherence and optional spec state.
     bool success = true;
     bool restored = false;
     bool draft_synchronized = false;

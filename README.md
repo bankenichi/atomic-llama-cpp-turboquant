@@ -12,6 +12,49 @@ ternary Q2_0-G128 weights, DSpark block-diffusion drafting, and vision in one
 `llama-server`. Gemma 4 vision with an external assistant head and Qwen 3.6
 embedded NextN remain first-class regression targets.
 
+This README is the operator's entry point, not a replacement for upstream's
+general documentation. It explains what is unusual about this fork, which model
+artifacts belong together, how the private features interact, and how to recognize
+the common failure modes. The implementation history and source credits are in
+[`NOTICE.md`](NOTICE.md); detailed engineering decisions live under
+[`docs/development/`](docs/development/).
+
+## How the pieces fit together
+
+The server runs one authoritative target model. Optional components attach to it:
+
+```text
+request
+  |
+  +-- text --------------------> target model ----> verified tokens
+  |                                ^     |
+  |                                |     +-- hidden-state taps
+  |                                |
+  |                         speculative drafter
+  |                         (DSpark, Gemma MTP,
+  |                          or Qwen NextN)
+  |
+  +-- image/audio/video ------> mmproj + target model
+                                      |
+                                      +-- draft marked out of sync
+
+next text request on that slot: clear/rebuild target + draft together, then resume drafting
+```
+
+Speculative output is never committed on trust. The drafter proposes tokens and
+the target verifies them, so a rejected proposal changes performance, not model
+semantics. Vision is deliberately target-only for the current drafters. The server
+therefore tracks whether each slot's target and draft represent the same prefix;
+this state travels with the secondary prompt cache and survives cache misses.
+
+There are three supported draft layouts:
+
+| Target | Draft artifact | CLI type | Notes |
+|---|---|---|---|
+| Ternary Bonsai 27B | Prism DSpark sidecar | `draft-dspark` | Block-diffusion draft, maximum 4096 positions per slot |
+| Gemma 4 | Separate assistant GGUF | `draft-mtp` | Supports modern and historical `gemma4_assistant` files |
+| Qwen 3.6 native-MTP | Embedded in target GGUF | `draft-mtp` | Reopens the same file with the draft architecture; no second path |
+
 ## Fork capabilities
 
 - Current `llama.cpp` server, model, backend, and multimodal architecture.
@@ -39,6 +82,14 @@ model loading must preserve text and image turns on the same server.
 CUDA builds must use the Visual Studio 2022 v143 toolset. Newer MSVC toolsets can
 crash `nvcc` even when host-only compilation succeeds.
 
+Prerequisites:
+
+- Windows 11 and an NVIDIA driver supporting the installed CUDA toolkit.
+- Visual Studio 2022 with Desktop development with C++ and the v143 toolset.
+- CMake and a CUDA toolkit capable of compiling Blackwell `sm_120` code.
+- Enough disk space for two build trees if CPU and CUDA regressions are run side
+  by side. Model files are not stored in this repository.
+
 ```powershell
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120a
 cmake --build build --config Release --target llama-server -j 8
@@ -47,6 +98,36 @@ ctest --test-dir build -C Release --output-on-failure
 
 The only CI workflow is [`.github/workflows/windows-cuda.yml`](.github/workflows/windows-cuda.yml).
 It builds the complete tool suite and publishes the rolling `latest` release.
+
+For a host-only diagnostic build, use a separate directory so it cannot reuse
+CUDA configuration accidentally:
+
+```powershell
+cmake -B build-cpu -DGGML_CUDA=OFF
+cmake --build build-cpu --config Release -j 8
+ctest --test-dir build-cpu -C Release --output-on-failure
+```
+
+## Model artifacts
+
+For the primary Prism deployment, download the matching base, DSpark, and mmproj
+files from the
+[`prism-ml/Ternary-Bonsai-27B-gguf` repository](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/tree/main).
+Do not mix a projector or drafter from a differently converted target merely
+because the architecture name matches: vocabulary, hidden-state taps, mask token,
+and projector geometry must agree with the target.
+
+Before launching, keep the three paths explicit:
+
+```powershell
+$BonsaiModel = 'C:\models\Ternary-Bonsai-27B-Q2_0.gguf'
+$BonsaiDraft = 'C:\models\Ternary-Bonsai-27B-dspark-Q4_1.gguf'
+$BonsaiMmproj = 'C:\models\Ternary-Bonsai-27B-mmproj-Q8_0.gguf'
+```
+
+The exact published filenames can change independently of this source tree, so
+the commands below use descriptive placeholders. Confirm the model card and file
+list before copying paths into a launcher.
 
 ## Run Ternary Bonsai + DSpark + vision
 
@@ -72,6 +153,13 @@ physical tensor spans and normalized to this fork's collision-free runtime type
 142. Raw type 42 remains standard group-64 Q2_0 when no span proves the legacy
 layout; contradictory layouts are rejected. Historical private types 43-46 are
 normalized to the current private IDs 241-244.
+
+The type-42 rule is intentionally conservative. Some aligned tensor spans are
+valid under both group sizes; in that case the reader keeps upstream's standardized
+group-64 meaning rather than guessing. A legacy Prism shard needs at least one
+physically decisive tensor. See
+[`docs/development/bonsai-dspark-turboquant.md`](docs/development/bonsai-dspark-turboquant.md)
+for the format and backend details.
 
 ## Run Gemma 4 assistant MTP + vision
 
@@ -108,6 +196,31 @@ build\bin\Release\llama-server.exe `
 
 The checked-in launcher is [`scripts/run-qwen36-27b-nextn-server.sh`](scripts/run-qwen36-27b-nextn-server.sh).
 
+## Confirm the server before connecting a frontend
+
+Start with a deterministic text request. This isolates model/draft loading from
+chat-template and media issues:
+
+```powershell
+$body = @{
+  model = 'local-model'
+  messages = @(@{ role = 'user'; content = 'Reply with only the number 42.' })
+  temperature = 0
+  max_tokens = 16
+} | ConvertTo-Json -Depth 6
+
+Invoke-RestMethod -Method Post `
+  -Uri 'http://127.0.0.1:8080/v1/chat/completions' `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+Then send one real image request and another unrelated text request on the same
+server. The post-media text request is the important cache-coherence check: logs
+should show a full prompt rebuild before speculative drafting resumes. Frontends
+such as SillyTavern should use the OpenAI-compatible Chat Completion endpoint at
+`/v1`; that lets the server apply the model's own template and media markers.
+
 ## Performance switches
 
 | Feature | Enable | Requirement |
@@ -119,6 +232,54 @@ The checked-in launcher is [`scripts/run-qwen36-27b-nextn-server.sh`](scripts/ru
 Keep dedicated VRAM below roughly 15 GB on the RTX 5080. Crossing that boundary
 can spill per-decode scratch into shared memory and collapse throughput. For MoE
 models, `--n-cpu-moe` is the main capacity/performance control.
+
+These switches are opt-in because they change resource behavior:
+
+- Expert prefetch creates a second same-device backend/stream and rotating staging
+  slots. It is useful only when expert tensors are actually CPU-resident.
+- Host registration pins mmap-backed CPU weight pages for DMA. Pinning consumes a
+  finite OS resource; disable it first when diagnosing allocation failures.
+- Adaptive TurboQuant promotes selected boundary layers. Disable it only for an
+  A/B comparison, not as a routine compatibility workaround.
+
+## Troubleshooting
+
+`number of bitmaps does not match number of markers`
+: The chat template dropped the internal media marker. Use this fork's current
+  server/chat code and the matching mmproj; do not bypass `/v1/chat/completions`
+  with a frontend-specific prompt formatter.
+
+Draft loads but accepts zero tokens
+: Confirm the target/draft pair, `--spec-type`, and draft precision. For DSpark,
+  also check that the sidecar metadata names, block size, and mask token are valid.
+  For Qwen, verify that the target actually contains the embedded NextN tensors.
+
+Failure after an image followed by text
+: Run with verbose server logs and look for `forcing full prompt rebuild`. Missing
+  that transition means target/draft cache coherence regressed; do not work around
+  it by globally disabling vision or prompt caching.
+
+Sudden throughput collapse near full VRAM
+: Increase `--n-cpu-moe` (offload more expert layers to CPU), reduce context or
+  parallel slots, or reclaim draft/model cache memory. The useful limit is the
+  point before Windows reports substantial shared-GPU-memory use, not the nominal
+  16 GB capacity.
+
+Unknown or conflicting raw tensor type 42
+: Modern files should use type 142 for Q2_0-G128. Legacy Prism files are accepted
+  only when their physical spans prove the group-128 layout. A mixed or corrupted
+  shard is rejected rather than silently misread.
+
+## Source lineage and credit
+
+This fork combines work from several projects and contributor communities. In
+particular, the inference framework comes from `ggml-org/llama.cpp`, the original
+MTP/TurboQuant fork lineage comes through `AtomicBot-ai`, ternary Bonsai and Prism
+DSpark compatibility come from `PrismML-Eng`, and expert-prefetch/mmap-pinning work
+was ported from `thecodacus/llama.cpp`. Those are not merely inspirations: portions
+of their implementations and history are present here. See [`NOTICE.md`](NOTICE.md)
+for links, named contributors where known, imported commit anchors, and the policy
+for preserving attribution.
 
 ## Documentation
 

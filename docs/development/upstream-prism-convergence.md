@@ -10,6 +10,32 @@ The convergence branch merged upstream through `d775b8967` and Prism work throug
 `0810d4bfb`, then reapplied private behavior against the modern model, server,
 speculative, and GGUF APIs.
 
+## Provenance and merge boundaries
+
+This effort combines independent lines of work; “convergence” does not mean local
+authorship of everything that now coexists:
+
+- `ggml-org/llama.cpp` through `d775b8967` supplies the modern server, model API,
+  mtmd stack, GGUF reader, and generic speculative implementations. Upstream
+  contributor authorship remains in the merged history.
+- `PrismML-Eng/llama.cpp` through `0810d4bfb` supplies the Prism ternary and DSpark
+  work used as the second integration source. The imported commits retain authors
+  such as Pasha Khosravi and Brian / `bri-prism` rather than being replayed as local
+  patches.
+- `AtomicBot-ai/atomic-llama-cpp-turboquant` is the parent of this personal fork and
+  supplies the pre-convergence Gemma MTP, Qwen NextN, TurboQuant, launcher, and
+  benchmark lineage.
+- `thecodacus/llama.cpp` branch `fable5/prefetch-experts` is the source of expert
+  prefetch overlap and mmap host pinning; Windows page-registration and subsequent
+  integration are local adaptations.
+- Commits after those merge points implement the collision policy, historical
+  assistant/DSpark compatibility, adaptive Bonsai CUDA correction, and server
+  coherence rules required to make the lines work together.
+
+See [`../../NOTICE.md`](../../NOTICE.md) for links and the standing attribution
+policy. The merge commits and imported authorship are intentional project records
+and should not be flattened during future rebases.
+
 ## Resulting architecture
 
 ### Ternary Bonsai
@@ -73,6 +99,19 @@ Vision context shift keeps two paths:
 
 - in-place f16/q8 K shift with chunk-aware range erasure and media-boundary snap;
 - transactional retained-window reprefill for TurboQuant and M-RoPE.
+
+The coherence bit is semantic state, not a cache optimization hint. It answers a
+specific question: “does the selected drafter represent the same accepted prefix
+as the target?” A request with real media sets it false; loading an mmproj does not.
+It becomes true only after a successful text batch is processed by the speculative
+implementation. This timing prevents a failed draft decode from being recorded as
+synchronized merely because the target prefill succeeded.
+
+The secondary prompt cache distinguishes three outcomes—restore failure, cache
+miss, and cache hit—because they have different state transitions. A miss preserves
+the current invalidation. A hit restores target bytes, draft bytes, coherence, and
+optional implementation boundary state as one entry. A failed multi-part restore
+does not consume the entry.
 
 ### Adaptive TurboQuant CUDA
 
