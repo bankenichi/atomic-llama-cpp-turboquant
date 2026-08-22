@@ -154,7 +154,6 @@ a.out.*
 AGENTS.local.md
 .pi/SYSTEM.md
 
-# Personal fork workspace and machine-specific launcher
+# Personal fork workspace
 .history/
 .scratch/
-run-gemma.ps1

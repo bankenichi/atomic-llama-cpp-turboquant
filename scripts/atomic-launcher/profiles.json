@@ -146,7 +146,7 @@
         "draft_model_file": "Ternary-Bonsai-27B-dspark-Q4_1.gguf",
         "mmproj_file": "Ternary-Bonsai-27B-mmproj-Q8_0.gguf",
         "ctx_size": 32768,
-        "cache_type_k": "turbo4",
+        "cache_type_k": "turbo3",
         "cache_type_v": "turbo3",
         "draft_cache_type_k": "q8_0",
         "draft_cache_type_v": "q8_0",
@@ -161,6 +161,19 @@
       },
       "presets": {
         "standard": {},
+        "32k": {},
+        "64k": {
+          "ctx_size": 65536,
+          "cache_type_k": "turbo3",
+          "cache_type_v": "turbo2",
+          "spec_draft_n_max": 3
+        },
+        "128k": {
+          "ctx_size": 131072,
+          "cache_type_k": "turbo3",
+          "cache_type_v": "turbo3",
+          "spec_draft_n_max": 4
+        },
         "target-only": {
           "spec_enabled": false,
           "spec_type": "none"

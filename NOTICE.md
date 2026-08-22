@@ -22,6 +22,12 @@ of its parent projects.
   release. The Q2_0-G128 backend work and Prism DSpark extensions were imported
   with their Git authorship intact. Contributors visible in that imported history
   include Pasha Khosravi and Brian / `bri-prism`.
+- Owner benchmark target artifact: **Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF**
+  ([model card](https://huggingface.co/Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF)).
+  The tested Q2_0 file is an abliterated low-degradation derivative of Prism's
+  Ternary Bonsai 27B; the DSpark sidecar and multimodal projector remain Prism
+  release artifacts. This artifact attribution is separate from source-code
+  authorship and licensing.
 - Expert-prefetch and mmap host-registration source:
   **thecodacus/llama.cpp**, branch
   [`fable5/prefetch-experts`](https://github.com/thecodacus/llama.cpp/tree/fable5/prefetch-experts).
@@ -73,8 +79,8 @@ Named contributor summary (non-exhaustive; Git history remains authoritative):
 
 Where an external model, conversion, importance matrix, or projector is used, its
 own model card and license remain controlling for that artifact. In particular,
-Qwen, Gemma, Unsloth, AtomicChat, and Prism model files are not relicensed by this
-source repository.
+Qwen, Gemma, Unsloth, AtomicChat, Prism, and Hikari07jp model files are not
+relicensed by this source repository.
 
 ## License
 
@@ -96,6 +102,8 @@ Important provenance-oriented records include:
   — what was merged, what was adapted, and the validation matrix;
 - [`docs/development/bonsai-dspark-turboquant.md`](docs/development/bonsai-dspark-turboquant.md)
   — ternary/DSpark/TurboQuant implementation details;
+- [`docs/development/ternary-performance-tuning.md`](docs/development/ternary-performance-tuning.md)
+  — exact derivative/sidecar/mmproj identities and the controlled profile sweep;
 - [`docs/development/thecodacus-prefetch-mmap-port.md`](docs/development/thecodacus-prefetch-mmap-port.md)
   — source comparison and port rationale;
 - [`docs/development/launcher-config-ui.md`](docs/development/launcher-config-ui.md)

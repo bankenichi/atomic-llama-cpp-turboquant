@@ -6,9 +6,10 @@ itself derived from [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp
 This repository is maintained for one private deployment and is not intended to
 submit changes upstream. See [`NOTICE.md`](NOTICE.md) for lineage and attribution.
 
-The current primary target is Prism ML's
-[`Ternary-Bonsai-27B-gguf`](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf):
-ternary Q2_0-G128 weights, DSpark block-diffusion drafting, and vision in one
+The current primary target combines Hikari07jp's Ternary Bonsai 27B derivative
+with Prism ML's matching
+[`DSpark and mmproj artifacts`](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf):
+ternary Q2_0-G128 weights, block-diffusion drafting, and vision in one
 `llama-server`. Gemma 4 vision with an external assistant head and Qwen 3.6
 embedded NextN remain first-class regression targets.
 
@@ -117,8 +118,10 @@ ctest --test-dir build-cpu -C Release --output-on-failure
 
 ## Model artifacts
 
-For the primary Prism deployment, download the matching base, DSpark, and mmproj
-files from the
+The owner target is Hikari07jp's
+[`Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf`](https://huggingface.co/Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF/blob/main/Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf),
+a derivative of Prism's Ternary Bonsai 27B. Its matching DSpark and mmproj files
+come from the
 [`prism-ml/Ternary-Bonsai-27B-gguf` repository](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/tree/main).
 Do not mix a projector or drafter from a differently converted target merely
 because the architecture name matches: vocabulary, hidden-state taps, mask token,
@@ -138,11 +141,13 @@ list before copying paths into a launcher.
 
 ## Run Ternary Bonsai + DSpark + vision
 
-The ignored owner wrapper delegates to the tracked canonical launcher and validates
+The tracked compatibility wrapper delegates to the canonical launcher and validates
 the selected binary, files, draft mode, cache types, and DSpark limits:
 
 ```powershell
 .\run-gemma.ps1 -Ternary
+.\run-gemma.ps1 -Ternary -TernaryPreset 64k   # 64K: turbo3/turbo2, depth 3
+.\run-gemma.ps1 -Ternary -TernaryPreset 128k  # 128K: turbo3/turbo3, depth 4
 .\run-gemma.ps1 -Ternary -NoSpec        # target-only, vision retained
 .\run-gemma.ps1 -Ternary -NoVision      # DSpark text-only
 .\run-gemma.ps1 -Ternary -FullKV        # full-f16 target diagnostic; Q8_0 draft
@@ -159,17 +164,24 @@ build\bin\Release\llama-server.exe `
   --spec-draft-n-max 4 `
   --mmproj 'C:\Program Files\llamacpp\Ternary-Bonsai-27B-mmproj-Q8_0.gguf' `
   -ngl 999 -ngld 999 `
-  -ctk turbo4 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 -fa on `
+  -ctk turbo3 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 -fa on `
   --ctx-size 32768 --parallel 1 --context-shift `
   --reasoning off
 ```
 
-The normal Ternary target cache is `turbo4` K / `turbo3` V. DSpark uses lossless
-`q8_0` K/V rather than spending memory on f16 draft KV. `-Ternary -FullKV` raises
+The standard 32K Ternary target cache is `turbo3` K / `turbo3` V at DSpark depth
+4. Controlled near-full testing selected `turbo3`/`turbo2` at depth 3 for 64K and
+`turbo3`/`turbo3` at depth 4 for 128K. DSpark uses lossless `q8_0` K/V rather
+than spending memory on f16 draft KV. `-Ternary -FullKV` raises
 only the target cache to f16 for controlled diagnostics; the draft cache remains
 q8_0/q8_0. The CUDA suite still retains the separate F16 K / Q8_0 V 576x512
 operator test because that layout is part of the fork's adaptive/compatibility
 surface even though it is no longer the owner launcher's default.
+
+See
+[`docs/development/ternary-performance-tuning.md`](docs/development/ternary-performance-tuning.md)
+for the complete screening matrix, deterministic text/retrieval/vision gates,
+rejected settings, and three-sample confirmation medians.
 
 Published Prism files that stored Q2_0-G128 under raw GGUF type 42 are detected by
 physical tensor spans and normalized to this fork's collision-free runtime type

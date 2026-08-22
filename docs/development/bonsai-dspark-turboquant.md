@@ -7,15 +7,23 @@ and DSpark implementation, and the private fork's vision and TurboQuant behavior
 
 ## Supported artifacts
 
-The acceptance target is the published
+Compatibility was originally accepted against the published
 [`prism-ml/Ternary-Bonsai-27B-gguf`](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/tree/main)
-set, tested without rewriting any file:
+set without rewriting any file. The current owner profile uses Hikari07jp's
+abliterated low-degradation derivative as its target with Prism's matching
+DSpark and mmproj artifacts:
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
-| `Ternary-Bonsai-27B-Q2_0.gguf` | 7,165,121,600 | `868c11714cf8fe47f5ec9eeb2be0ab1a337112886f92ee0ede6b855c4fa31757` |
+| Prism canonical `Ternary-Bonsai-27B-Q2_0.gguf` | 7,165,121,600 | `868c11714cf8fe47f5ec9eeb2be0ab1a337112886f92ee0ede6b855c4fa31757` |
+| Owner target `Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf` | 7,165,121,600 | `527f276ddf047b3494de964985b5529b9fc3ecf739ea64d8fab3a6ef8403e81d` |
 | `Ternary-Bonsai-27B-dspark-Q4_1.gguf` | 1,946,393,568 | `c4810091d244eddc61a0cc4966e584b0959f141e3c66c0d371a6652d9f647da9` |
 | `Ternary-Bonsai-27B-mmproj-Q8_0.gguf` | 629,246,880 | `eb561d41a7bbeb0fcf04883c8af11078ef6cae0a66862a0b68443cfca495269d` |
+
+The owner target's source and derivative provenance are recorded in
+[`ternary-performance-tuning.md`](ternary-performance-tuning.md). Keeping the two
+base hashes distinct prevents benchmark results from being attributed to Prism's
+canonical target when the derivative was actually loaded.
 
 The base file uses the historical Prism physical encoding in which GGUF tensor
 type 42 contains group-128 Q2 rows. Type 42 now means upstream group-64 Q2, so
@@ -43,8 +51,10 @@ Loading an mmproj does not disable speculation for text. The server distinguishe
 an attached image from the mere presence of an mtmd context:
 
 - text turns may draft while the mmproj is loaded;
-- media turns bypass drafting and prime the target safely;
-- later text turns resume only from coherent draft state;
+- DFlash/DSpark media turns pool target-derived image features into the draft
+  prefill, so image answers can draft without fabricating draft-model vision;
+- retained-image follow-ups continue from coherent paired target/draft state
+  rather than turning the historical image into a permanent speculation veto;
 - templates that cannot represent typed content retain the internal media marker
   through the string-content fallback;
 - context shifting snaps past media boundaries;
@@ -100,9 +110,15 @@ the active scale.
   --spec-type draft-dspark --spec-draft-n-max 4 `
   --mmproj Ternary-Bonsai-27B-mmproj-Q8_0.gguf `
   -ngl 99 -ngld 99 `
-  -ctk turbo4 -ctv turbo2 -fa on `
-  --ctx-size 0 --context-shift --reasoning off
+  -ctk turbo3 -ctv turbo3 -ctkd q8_0 -ctvd q8_0 -fa on `
+  --ctx-size 32768 --context-shift --reasoning off
 ```
+
+That command is the validated 32K profile. For 64K use target
+`-ctk turbo3 -ctv turbo2`, `--spec-draft-n-max 3`, and `--ctx-size 65536`.
+For 128K use target `-ctk turbo3 -ctv turbo3`, depth 4, and
+`--ctx-size 131072`. The full controlled comparison is documented in
+[`ternary-performance-tuning.md`](ternary-performance-tuning.md).
 
 Tune GPU layers and context size to keep dedicated VRAM below the owner's
 approximately 15 GiB performance cliff. Bonsai itself is dense; do not apply the

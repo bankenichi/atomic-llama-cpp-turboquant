@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-22",
+  "scope": "owner RTX 5080 Ternary Bonsai context-tier optimization",
+  "binary_source_commit": "7bdb1947d1c6286be249861d23587034fab9a40e",
+  "benchmark_plan_commit": "ce97dca2c2962696887060e50a78908abae86824",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "driver": "610.88",
+    "dedicated_memory_mib": 16303,
+    "cpu": "Intel Core i9-14900K",
+    "system_memory_gib": 64
+  },
+  "artifacts": [
+    {
+      "role": "server",
+      "path": "build-rollover/bin/Release/llama-server.exe",
+      "bytes": 10752,
+      "sha256": "9a8c68ca829d06feba3f342b37e12e9631164a4ef09672712ba123428cd78526"
+    },
+    {
+      "role": "target",
+      "file": "Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf",
+      "source": "https://huggingface.co/Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF/blob/main/Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.gguf",
+      "bytes": 7165121600,
+      "sha256": "527f276ddf047b3494de964985b5529b9fc3ecf739ea64d8fab3a6ef8403e81d"
+    },
+    {
+      "role": "draft",
+      "file": "Ternary-Bonsai-27B-dspark-Q4_1.gguf",
+      "source": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/tree/main",
+      "bytes": 1946393568,
+      "sha256": "c4810091d244eddc61a0cc4966e584b0959f141e3c66c0d371a6652d9f647da9"
+    },
+    {
+      "role": "mmproj",
+      "file": "Ternary-Bonsai-27B-mmproj-Q8_0.gguf",
+      "source": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/tree/main",
+      "bytes": 629246880,
+      "sha256": "eb561d41a7bbeb0fcf04883c8af11078ef6cae0a66862a0b68443cfca495269d"
+    }
+  ],
+  "fixed_argv": [
+    "--n-gpu-layers", "all", "--keep", "-1", "--parallel", "1",
+    "--load-mode", "mlock", "--jinja", "--flash-attn", "on",
+    "--context-shift", "--spec-type", "draft-dspark",
+    "--spec-draft-ngl", "all", "--spec-draft-type-k", "q8_0",
+    "--spec-draft-type-v", "q8_0", "--reasoning", "on", "--metrics"
+  ],
+  "sampling": {
+    "temperature": 0,
+    "top_k": 1,
+    "seed": 4242
+  },
+  "runtime_screen": [
+    {"lever":"cuda_graph","variant":"default-short","decode_tps":136.98,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-nglall-20260822-032915.stderr.log"},
+    {"lever":"cuda_graph","variant":"qkv-opt-short","decode_tps":138.19,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g1-nglall-20260822-032921.stderr.log"},
+    {"lever":"cuda_graph","variant":"default-near-full","decode_tps":119.25,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-nglall-20260822-032942.stderr.log"},
+    {"lever":"cuda_graph","variant":"qkv-opt-near-full","decode_tps":117.38,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g1-nglall-20260822-033007.stderr.log"},
+    {"lever":"batch","variant":"2048/512","decode_tps":119.25,"prompt_tps":1566.0,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-nglall-20260822-032942.stderr.log"},
+    {"lever":"batch","variant":"2048/1024","decode_tps":100.88,"prompt_tps":1584.0,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-b2048-u1024-g0-nglall-20260822-033032.stderr.log"},
+    {"lever":"batch","variant":"4096/1024","decode_tps":97.36,"prompt_tps":1604.0,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-b4096-u1024-g0-nglall-20260822-033058.stderr.log"},
+    {"lever":"cpu-placement","variant":"default","decode_tps":117.16,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033347.stderr.log"},
+    {"lever":"cpu-placement","variant":"pcores8","decode_tps":116.79,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpupcores8-nglall-20260822-033414.stderr.log"},
+    {"lever":"cpu-placement","variant":"pcores16","decode_tps":120.16,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpupcores16-nglall-20260822-033439.stderr.log"},
+    {"lever":"draft-p-min","variant":"0.00","decode_tps":70.665,"acceptance":0.69388,"source_log":"ternary-d4-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033524.stderr.log"},
+    {"lever":"draft-p-min","variant":"0.05","decode_tps":63.752,"acceptance":0.69388,"source_log":"ternary-d4-p0p05-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033619.stderr.log"},
+    {"lever":"draft-p-min","variant":"0.10","decode_tps":68.906,"acceptance":0.69388,"source_log":"ternary-d4-p0p1-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033715.stderr.log"},
+    {"lever":"draft-p-min","variant":"0.20","decode_tps":72.229,"acceptance":0.69388,"source_log":"ternary-d4-p0p2-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033810.stderr.log"},
+    {"lever":"draft-depth","variant":"depth3-64k","decode_tps":82.806,"acceptance":1.0,"source_log":"ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-033908.stderr.log"}
+  ],
+  "kv_screen_short": [
+    {"context":32768,"depth":4,"k":"turbo4","v":"turbo3","prompt_tokens":1798,"prompt_tps":1165.00,"decode_tps":128.01,"acceptance":0.87805,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034020.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo4","v":"turbo2","prompt_tokens":1798,"prompt_tps":1103.78,"decode_tps":132.82,"acceptance":0.87805,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034027.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo3","v":"turbo3","prompt_tokens":1798,"prompt_tps":1139.03,"decode_tps":129.62,"acceptance":0.87805,"source_log":"ternary-d4-p0-c32768-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034033.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo3","v":"turbo2","prompt_tokens":1798,"prompt_tps":1150.77,"decode_tps":137.36,"acceptance":0.87805,"source_log":"ternary-d4-p0-c32768-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034040.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo4","v":"turbo3","prompt_tokens":1798,"prompt_tps":1179.75,"decode_tps":126.89,"acceptance":0.91892,"source_log":"ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034046.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo4","v":"turbo2","prompt_tokens":1798,"prompt_tps":1177.09,"decode_tps":122.86,"acceptance":0.91892,"source_log":"ternary-d3-p0-c65536-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034052.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo3","v":"turbo3","prompt_tokens":1798,"prompt_tps":1179.64,"decode_tps":128.73,"acceptance":0.91892,"source_log":"ternary-d3-p0-c65536-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034058.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo3","v":"turbo2","prompt_tokens":1798,"prompt_tps":1168.87,"decode_tps":125.96,"acceptance":0.91892,"source_log":"ternary-d3-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034105.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo4","v":"turbo3","prompt_tokens":1798,"prompt_tps":1173.33,"decode_tps":137.21,"acceptance":0.87805,"source_log":"ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034111.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo4","v":"turbo2","prompt_tokens":1798,"prompt_tps":1102.99,"decode_tps":131.06,"acceptance":0.87805,"source_log":"ternary-d4-p0-c131072-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034117.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo3","v":"turbo3","prompt_tokens":1798,"prompt_tps":1157.29,"decode_tps":140.07,"acceptance":0.87805,"source_log":"ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034124.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo3","v":"turbo2","prompt_tokens":1798,"prompt_tps":1123.04,"decode_tps":132.91,"acceptance":0.87805,"source_log":"ternary-d4-p0-c131072-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034130.stderr.log"}
+  ],
+  "kv_screen_near_full": [
+    {"context":32768,"depth":4,"k":"turbo4","v":"turbo3","decode_tps":116.001,"acceptance":0.925,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034150.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo4","v":"turbo2","decode_tps":92.427,"acceptance":0.68,"source_log":"ternary-d4-p0-c32768-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034215.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo3","v":"turbo3","decode_tps":122.741,"acceptance":0.925,"source_log":"ternary-d4-p0-c32768-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034241.stderr.log"},
+    {"context":32768,"depth":4,"k":"turbo3","v":"turbo2","decode_tps":99.484,"acceptance":0.68,"source_log":"ternary-d4-p0-c32768-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034306.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo4","v":"turbo3","decode_tps":82.712,"acceptance":1.0,"source_log":"ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034344.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo4","v":"turbo2","decode_tps":82.663,"acceptance":1.0,"source_log":"ternary-d3-p0-c65536-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034436.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo3","v":"turbo3","decode_tps":81.862,"acceptance":1.0,"source_log":"ternary-d3-p0-c65536-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034528.stderr.log"},
+    {"context":65536,"depth":3,"k":"turbo3","v":"turbo2","decode_tps":89.679,"acceptance":1.0,"source_log":"ternary-d3-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034622.stderr.log"},
+    {"context":65536,"depth":4,"k":"turbo4","v":"turbo3","decode_tps":68.039,"acceptance":0.69388,"source_log":"ternary-d4-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034724.stderr.log"},
+    {"context":65536,"depth":4,"k":"turbo4","v":"turbo2","decode_tps":85.626,"acceptance":0.85714,"source_log":"ternary-d4-p0-c65536-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-034820.stderr.log"},
+    {"context":65536,"depth":4,"k":"turbo3","v":"turbo3","decode_tps":77.288,"acceptance":0.69388,"source_log":"ternary-d4-p0-c65536-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-034913.stderr.log"},
+    {"context":65536,"depth":4,"k":"turbo3","v":"turbo2","decode_tps":79.320,"acceptance":0.69388,"source_log":"ternary-d4-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-035005.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo4","v":"turbo3","decode_tps":59.982,"acceptance":0.83721,"source_log":"ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-035113.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo4","v":"turbo2","decode_tps":61.041,"acceptance":0.9,"source_log":"ternary-d4-p0-c131072-kturbo4-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-035320.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo3","v":"turbo3","decode_tps":72.131,"acceptance":0.97368,"source_log":"ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-035526.stderr.log"},
+    {"context":131072,"depth":4,"k":"turbo3","v":"turbo2","decode_tps":58.327,"acceptance":0.9,"source_log":"ternary-d4-p0-c131072-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-035732.stderr.log"}
+  ],
+  "confirmation": {
+    "32768": {
+      "reference": {"k":"turbo4","v":"turbo3","depth":4,"measure_tps":[136.112,142.882,137.554],"probe_tps":[121.617,119.221,117.590],"median_measure_tps":137.554,"result_files":["ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042110.result.json","ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042244.result.json","ternary-d4-p0-c32768-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-045504.result.json"]},
+      "candidate": {"k":"turbo3","v":"turbo3","depth":4,"measure_tps":[138.410,143.815,142.852],"probe_tps":[122.314,121.626,122.629],"median_measure_tps":142.852,"result_files":["ternary-d4-p0-c32768-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042157.result.json","ternary-d4-p0-c32768-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042331.result.json","ternary-d4-p0-c32768-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-045551.result.json"]},
+      "gain_percent": 3.852
+    },
+    "65536": {
+      "reference": {"k":"turbo4","v":"turbo3","depth":3,"measure_tps":[90.764,95.840,95.252],"probe_tps":[83.912,82.568,83.844],"median_measure_tps":95.252,"result_files":["ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042427.result.json","ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-042749.result.json","ternary-d3-p0-c65536-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-045651.result.json"]},
+      "candidate": {"k":"turbo3","v":"turbo2","depth":3,"measure_tps":[101.946,97.194,103.734],"probe_tps":[86.963,85.375,89.050],"median_measure_tps":101.946,"result_files":["ternary-d3-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-042608.result.json","ternary-d3-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-042931.result.json","ternary-d3-p0-c65536-kturbo3-vturbo2-bdef-udef-g0-cpudefault-nglall-20260822-045831.result.json"]},
+      "gain_percent": 7.028
+    },
+    "131072": {
+      "excluded_pair": {"reason":"background VRAM delta 268 MiB exceeds 256 MiB","reference_before_mib":1714,"candidate_before_mib":1446,"result_files":["ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-043134.result.json","ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-043544.result.json"]},
+      "reference": {"k":"turbo4","v":"turbo3","depth":4,"measure_tps":[73.780,74.615,74.379],"probe_tps":[60.527,63.309,63.154],"ready_mib":[14990,15113,15154],"median_measure_tps":74.379,"result_files":["ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-043943.result.json","ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-050021.result.json","ternary-d4-p0-c131072-kturbo4-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-050834.result.json"]},
+      "candidate": {"k":"turbo3","v":"turbo3","depth":4,"measure_tps":[79.395,80.549,81.761],"probe_tps":[71.740,72.747,72.462],"ready_mib":[14682,14801,14848],"median_measure_tps":80.549,"result_files":["ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-044353.result.json","ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-050425.result.json","ternary-d4-p0-c131072-kturbo3-vturbo3-bdef-udef-g0-cpudefault-nglall-20260822-051239.result.json"]},
+      "gain_percent": 8.296
+    }
+  },
+  "strict_quality": [
+    {"context":32768,"depth":4,"k":"turbo4","v":"turbo3","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":425,"followup_accepted":136,"pass":true,"result":"quality-c32768-d4-kturbo4-vturbo3-20260822-051903.quality.json"},
+    {"context":32768,"depth":4,"k":"turbo3","v":"turbo3","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":447,"followup_accepted":155,"pass":true,"result":"quality-c32768-d4-kturbo3-vturbo3-20260822-052001.quality.json"},
+    {"context":65536,"depth":3,"k":"turbo4","v":"turbo3","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":248,"followup_accepted":126,"pass":true,"result":"quality-c65536-d3-kturbo4-vturbo3-20260822-052055.quality.json"},
+    {"context":65536,"depth":3,"k":"turbo3","v":"turbo2","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":434,"followup_accepted":157,"pass":true,"result":"quality-c65536-d3-kturbo3-vturbo2-20260822-052157.quality.json"},
+    {"context":65536,"depth":4,"k":"turbo4","v":"turbo2","text":"4/4","retrieval":false,"retrieval_finish_reason":"length","vision":"3/3","pass":false,"result":"quality-c65536-d4-kturbo4-vturbo2-20260822-052259.quality.json"},
+    {"context":131072,"depth":4,"k":"turbo4","v":"turbo3","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":425,"followup_accepted":136,"pass":true,"result":"quality-c131072-d4-kturbo4-vturbo3-20260822-052428.quality.json"},
+    {"context":131072,"depth":4,"k":"turbo3","v":"turbo3","text":"4/4","retrieval":true,"vision":"3/3","image_accepted":447,"followup_accepted":155,"pass":true,"result":"quality-c131072-d4-kturbo3-vturbo3-20260822-052635.quality.json"}
+  ],
+  "promoted_profiles": {
+    "32k": {"context":32768,"k":"turbo3","v":"turbo3","depth":4,"draft_k":"q8_0","draft_v":"q8_0"},
+    "64k": {"context":65536,"k":"turbo3","v":"turbo2","depth":3,"draft_k":"q8_0","draft_v":"q8_0"},
+    "128k": {"context":131072,"k":"turbo3","v":"turbo3","depth":4,"draft_k":"q8_0","draft_v":"q8_0"}
+  }
+}

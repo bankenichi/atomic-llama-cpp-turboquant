@@ -121,6 +121,8 @@ changes, require:
 - `docs/development/mtp-cpumoe-vision-fixes.md` — historical Gemma root causes.
 - `docs/development/gemma4-12b-vision.md` — template/encoder-free vision history.
 - `docs/development/performance-features.md` — runtime performance switches.
+- `docs/development/ternary-performance-tuning.md` — validated 32K/64K/128K
+  Bonsai profiles, quality gates, rejected settings, and confirmation medians.
 - `NOTICE.md` — lineage and attribution.
 
 ## Conventions

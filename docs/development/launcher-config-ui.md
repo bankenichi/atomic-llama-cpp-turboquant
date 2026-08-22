@@ -98,7 +98,10 @@ retired `C:\llm-work` path.
 ### Ternary Bonsai
 
 The standard profile uses the exact owner files, `draft-dspark`, four draft tokens,
-target turbo4/turbo3 KV, lossless draft q8_0/q8_0 KV, 32K target context, and vision. Validation
+target turbo3/turbo3 KV, lossless draft q8_0/q8_0 KV, 32K target context, and vision.
+The validated `64k` profile uses target turbo3/turbo2 KV with depth 3; the `128k`
+profile uses turbo3/turbo3 with depth 4. Both retain Q8_0/Q8_0 draft KV and vision.
+Validation
 requires the sidecar, limits the selected draft length to 16, and reports the
 runtime-enforced 4096 draft positions per parallel slot. The launcher does not
 duplicate GGUF type-42 recognition or DSpark metadata parsing; the C++ loader

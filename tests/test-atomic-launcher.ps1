@@ -67,7 +67,7 @@ Assert-Equal $qwenPlan.environment.GGML_SCHED_PREFETCH_EXPERTS '1' 'Qwen enables
 $ternary = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset standard
 Assert-Equal $ternary.spec_type 'draft-dspark' 'Ternary standard uses DSpark'
 Assert-Equal $ternary.spec_draft_n_max 4 'Ternary standard uses the tested four-token draft'
-Assert-Equal $ternary.cache_type_k 'turbo4' 'Ternary target K cache uses the owner standard'
+Assert-Equal $ternary.cache_type_k 'turbo3' 'Ternary 32K target K cache uses the validated profile'
 Assert-Equal $ternary.cache_type_v 'turbo3' 'Ternary target V cache uses the owner standard'
 Assert-Equal $ternary.draft_cache_type_k 'q8_0' 'Ternary draft K cache uses lossless Q8_0'
 Assert-Equal $ternary.draft_cache_type_v 'q8_0' 'Ternary draft V cache uses lossless Q8_0'
@@ -76,15 +76,67 @@ Assert-True $ternary.model.EndsWith('Ternary-Bonsai-27B-Abliterated-LowDeg-Q2_0.
 Assert-True $ternary.draft_model.EndsWith('Ternary-Bonsai-27B-dspark-Q4_1.gguf') 'Ternary draft path matches the local artifact'
 Assert-True $ternary.mmproj.EndsWith('Ternary-Bonsai-27B-mmproj-Q8_0.gguf') 'Ternary mmproj path matches the local artifact'
 
+$ternary64k = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset 64k
+Assert-Equal $ternary64k.ctx_size 65536 'Ternary 64K profile sets the validated context'
+Assert-Equal $ternary64k.cache_type_k 'turbo3' 'Ternary 64K profile uses validated Turbo3 K'
+Assert-Equal $ternary64k.cache_type_v 'turbo2' 'Ternary 64K profile uses validated Turbo2 V'
+Assert-Equal $ternary64k.spec_draft_n_max 3 'Ternary 64K profile uses validated depth 3'
+Assert-Equal $ternary64k.draft_cache_type_k 'q8_0' 'Ternary 64K keeps lossless draft K'
+Assert-Equal $ternary64k.draft_cache_type_v 'q8_0' 'Ternary 64K keeps lossless draft V'
+
+$ternary128k = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset 128k
+Assert-Equal $ternary128k.ctx_size 131072 'Ternary 128K profile sets the validated context'
+Assert-Equal $ternary128k.cache_type_k 'turbo3' 'Ternary 128K profile uses validated Turbo3 K'
+Assert-Equal $ternary128k.cache_type_v 'turbo3' 'Ternary 128K profile uses validated Turbo3 V'
+Assert-Equal $ternary128k.spec_draft_n_max 4 'Ternary 128K profile uses validated depth 4'
+Assert-Equal $ternary128k.draft_cache_type_k 'q8_0' 'Ternary 128K keeps lossless draft K'
+Assert-Equal $ternary128k.draft_cache_type_v 'q8_0' 'Ternary 128K keeps lossless draft V'
+
 $ternaryPlan = New-AtomicLaunchPlan -Configuration $ternary -SkipFileValidation
 Assert-True $ternaryPlan.validation.valid 'Standard Ternary plan validates'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-type') 'draft-dspark' 'Ternary command emits DSpark'
-Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--cache-type-k') 'turbo4' 'Ternary command emits target K cache'
+Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--cache-type-k') 'turbo3' 'Ternary command emits target K cache'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--cache-type-v') 'turbo3' 'Ternary command emits target V cache'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-draft-type-k') 'q8_0' 'Ternary command emits lossless draft K cache'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--spec-draft-type-v') 'q8_0' 'Ternary command emits lossless draft V cache'
 Assert-Equal (Get-ArgumentValue $ternaryPlan.arguments '--model-draft') $ternary.draft_model 'Ternary command emits the sidecar path literally'
 Assert-True (-not ($ternaryPlan.arguments -contains '--spec-draft-ctx-size')) 'Launcher never emits the stale draft-context flag'
+
+foreach ($wrapperTier in @(
+    @{ preset = '32k'; ctx = 32768; k = 'turbo3'; v = 'turbo3'; depth = 4 },
+    @{ preset = '64k'; ctx = 65536; k = 'turbo3'; v = 'turbo2'; depth = 3 },
+    @{ preset = '128k'; ctx = 131072; k = 'turbo3'; v = 'turbo3'; depth = 4 }
+)) {
+    $wrapperOutput = & pwsh -NoProfile -File (Join-Path $repoRoot 'run-gemma.ps1') `
+        -Ternary -TernaryPreset $wrapperTier.preset -Preview -SkipFileValidation -NoCapabilityProbe
+    Assert-Equal $LASTEXITCODE 0 "Wrapper $($wrapperTier.preset) preview exits successfully"
+    $wrapperPlan = $wrapperOutput | ConvertFrom-Json
+    Assert-True $wrapperPlan.validation.valid "Wrapper $($wrapperTier.preset) preview validates"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--ctx-size') $wrapperTier.ctx "Wrapper $($wrapperTier.preset) context"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--cache-type-k') $wrapperTier.k "Wrapper $($wrapperTier.preset) target K"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--cache-type-v') $wrapperTier.v "Wrapper $($wrapperTier.preset) target V"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--spec-draft-n-max') $wrapperTier.depth "Wrapper $($wrapperTier.preset) draft depth"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--spec-draft-type-k') 'q8_0' "Wrapper $($wrapperTier.preset) draft K"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--spec-draft-type-v') 'q8_0' "Wrapper $($wrapperTier.preset) draft V"
+    Assert-Equal (Get-ArgumentValue $wrapperPlan.arguments '--mmproj') $ternary.mmproj "Wrapper $($wrapperTier.preset) retains vision"
+}
+
+$wrapperAliasOutput = & pwsh -NoProfile -File (Join-Path $repoRoot 'run-gemma.ps1') `
+    -Ternary -CtxSize 65536 -Preview -SkipFileValidation -NoCapabilityProbe
+Assert-Equal $LASTEXITCODE 0 'Wrapper 64K context alias preview exits successfully'
+$wrapperAliasPlan = $wrapperAliasOutput | ConvertFrom-Json
+Assert-Equal (Get-ArgumentValue $wrapperAliasPlan.arguments '--cache-type-k') 'turbo3' 'Wrapper 64K context alias selects tuned K'
+Assert-Equal (Get-ArgumentValue $wrapperAliasPlan.arguments '--cache-type-v') 'turbo2' 'Wrapper 64K context alias selects tuned V'
+Assert-Equal (Get-ArgumentValue $wrapperAliasPlan.arguments '--spec-draft-n-max') 3 'Wrapper 64K context alias selects tuned depth'
+
+$wrapperFullOutput = & pwsh -NoProfile -File (Join-Path $repoRoot 'run-gemma.ps1') `
+    -Ternary -TernaryPreset 128k -FullKV -Preview -SkipFileValidation -NoCapabilityProbe
+Assert-Equal $LASTEXITCODE 0 'Wrapper target-full-f16 preview exits successfully'
+$wrapperFullPlan = $wrapperFullOutput | ConvertFrom-Json
+Assert-Equal (Get-ArgumentValue $wrapperFullPlan.arguments '--cache-type-k') 'f16' 'Wrapper FullKV raises target K to f16'
+Assert-Equal (Get-ArgumentValue $wrapperFullPlan.arguments '--cache-type-v') 'f16' 'Wrapper FullKV raises target V to f16'
+Assert-Equal (Get-ArgumentValue $wrapperFullPlan.arguments '--spec-draft-type-k') 'q8_0' 'Wrapper FullKV preserves lossless draft K'
+Assert-Equal (Get-ArgumentValue $wrapperFullPlan.arguments '--spec-draft-type-v') 'q8_0' 'Wrapper FullKV preserves lossless draft V'
 
 $ternaryFull = Resolve-AtomicConfiguration -ProfilesPath $profilesPath -Stack ternary -Preset full-f16
 Assert-Equal $ternaryFull.cache_type_k 'f16' 'Full-f16 Ternary target K cache'
