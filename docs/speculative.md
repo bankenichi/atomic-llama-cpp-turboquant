@@ -114,6 +114,32 @@ See:
 
 - #25173
 
+### Multi-Token Prediction (`draft-mtp`)
+
+`draft-mtp` consumes target hidden states with an MTP/NextN head and verifies the
+resulting token chain on the target. This fork supports both an external Gemma 4
+assistant and a Qwen combined GGUF with embedded NextN tensors.
+
+External Gemma assistant:
+
+```bash
+llama-server -m gemma-target.gguf --model-draft gemma-assistant.gguf \
+    --spec-type draft-mtp --spec-draft-n-max 2
+```
+
+Embedded Qwen NextN:
+
+```bash
+llama-server -m qwen-native-mtp.gguf \
+    --spec-type draft-mtp --spec-draft-n-max 2
+```
+
+For embedded NextN, omit `--model-draft`; the target file is reopened through the
+draft architecture automatically. The historical `mtp`/`nextn` speculative type
+names and `--draft-max`/`--draft-block-size` options are not accepted.
+
+See [`../MTP.md`](../MTP.md) and [`../NEXTN.md`](../NEXTN.md).
+
 ### n-gram Cache (`ngram-cache`)
 
 An n-gram is a sequence of n tokens. The n-gram cache implementation maintains statistics about short n-gram sequences.

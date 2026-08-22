@@ -81,15 +81,15 @@ ARGS=(
   --parallel "$PARALLEL"
   -np "$PARALLEL"
   --cont-batching
+  --context-shift
 )
 
 if [[ "$SPEC" == "mtp" ]]; then
   ARGS+=(
-    --mtp-head "$DRAFT"
-    --spec-type mtp
-    --draft-block-size "${DRAFT_BLOCK_SIZE:-3}"
-    --draft-max "${DRAFT_MAX:-16}"
-    --draft-min "${DRAFT_MIN:-0}"
+    --model-draft "$DRAFT"
+    --spec-type draft-mtp
+    --spec-draft-n-max "${DRAFT_MAX:-2}"
+    --spec-draft-n-min "${DRAFT_MIN:-0}"
   )
 else
   echo "info: speculative decoding disabled (SPEC=${SPEC}); running baseline" >&2

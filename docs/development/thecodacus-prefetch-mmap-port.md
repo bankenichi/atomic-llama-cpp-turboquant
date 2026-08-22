@@ -121,8 +121,11 @@ low-risk** one — it directly targets the `n-cpu-moe` prefill path this stack b
   context-shift-with-vision + `get_can_shift` work) and `ggml-cpu/ops.cpp` (+150/−16 CPU turbo
   path); `ggml.h` +11 (enum placement). → turbo-level fixes/knowledge transfer cleanly.
 
-**MTP: substantially different implementations (shared base framework only).**
-Both expose `COMMON_SPECULATIVE_TYPE_MTP` and a `common/speculative.cpp`, but diverge below that:
+**MTP note (historical):** the table below described the two trees before the
+upstream/Prism convergence. The maintained fork now uses the unified
+`COMMON_SPECULATIVE_TYPE_DRAFT_MTP` implementation and generic `--spec-*` CLI.
+
+Both trees originally shared a speculative framework but diverged below it:
 
 | | Atomic fork | Qwen fork (turboquant-mtp) |
 |---|---|---|
@@ -131,7 +134,7 @@ Both expose `COMMON_SPECULATIVE_TYPE_MTP` and a `common/speculative.cpp`, but di
 | Heads | `gemma4-assistant.cpp`, `qwen35-nextn.cpp` loaded into target | `qwen35_mtp` / `qwen35moe_mtp` archs w/ NextN tensors (`blk.N.nextn.*`) |
 | Spec types | `MTP` **and** `NEXTN` | `MTP` only |
 | Runtime | `decode_mtp` / `sched_mtp` in `llama-context` | arch builds NextN predict layers; `kv_only_nextn` |
-| CLI | `--spec-type mtp/nextn`, `--mtp-head`, `--draft-block-size` | generic `--spec-*` |
+| CLI | historical private MTP/NextN flags | generic `--spec-*` |
 
 Implication: the atomic MTP (general spec runtime; Gemma assistant + Qwen NextN) and the Qwen-fork
 MTP (arch-based NextN) are **not interchangeable**; unifying them would be real work. It does not

@@ -1,18 +1,20 @@
 # Gemma 4 MTP + `--n-cpu-moe` + vision (`--mmproj`): fixes
 
-Authoritative writeup of the four changes that make Gemma 4 MTP speculative
+Historical root-cause writeup of the changes that made Gemma 4 MTP speculative
 decoding work on a VRAM-constrained, CPU-offloaded MoE target with a vision
-projector loaded. Supersedes the investigation log in
-`mtp-mmproj-textonly-fix.md`.
+projector loaded. The implementation has since converged on the current
+`draft-mtp` driver; current CLI and cache-lifecycle behavior are authoritative in
+[`../development/upstream-prism-convergence.md`](upstream-prism-convergence.md)
+and [`../../MTP.md`](../../MTP.md).
 
 ## Target configuration
 
 - Model: `gemma-4-26B-A4B-it` (MoE, `gemma4` arch), Q4_K_M.
-- Draft head: `gemma-4-26B-A4B-it-assistant` (`gemma4_assistant`), Q8_0, via `--mtp-head`.
+- Draft head: `gemma-4-26B-A4B-it-assistant` (`gemma4_assistant`), Q8_0, via `--model-draft`.
 - GPU: single RTX 5080, 16 GB. 26B does **not** fit fully → `--n-cpu-moe 28`
   (experts on CPU) is mandatory.
 - Vision: `--mmproj` (gemma4v projector).
-- Speculative: `--spec-type mtp`, `--draft-block-size 3`, TurboQuant KV
+- Speculative: `--spec-type draft-mtp`, `--spec-draft-n-max 2`, TurboQuant KV
   (`-ctk/-ctv turbo4/turbo2`, draft `-ctkd/-ctvd turbo3`), `-fa on`.
 
 Symptom before fixes: MTP never drafted with `--mmproj` loaded; removing
@@ -126,33 +128,27 @@ load-bearing (the crash was Fix 2), but defensible and known-good.
 
 ---
 
-## Image-turn drafting is safe (by design)
+## Image-turn cache safety after convergence
 
-After the fixes, MTP also drafts on image turns (the per-turn draft gate sees no
-live media at generation time). This is correct and beneficial, not a bug:
-
-- **Speculative decoding is output-correct by construction** — the target verifies
-  every drafted token and rejects any it disagrees with. Drafting on an image turn
-  can never corrupt output; worst case is wasted compute at low acceptance.
-- MTP per-step draft only needs the **last accepted token's** hidden state (always a
-  text position) and cross-attends into the target KV (image K/V live there fine).
-  It never needs per-token hidden states over image positions.
-- The only image-incompatible step is the **prime**, which is still skipped on
-  media prompts (and for MTP `begin()` is a near no-op anyway).
-
-Observed: ~60–75% token acceptance on image turns, image content parsed correctly.
+The modern server does not assume that a draft context consumed target-only media
+positions. A real-media request invalidates speculative synchronization. Before a
+later text request can reuse a cached target prefix, `server_spec_context_state`
+forces a position-zero removal and paired rebuild of target and draft. This
+supersedes the earlier behavior described during the original investigation.
 
 ---
 
 ## Verification
 
-Run with `--mmproj`, `--spec-type mtp`, valid `--mtp-head`, `--n-cpu-moe 28`.
+Run with `--mmproj`, `--spec-type draft-mtp`, valid `--model-draft`, and
+`--n-cpu-moe` sized for the GPU.
 
 1. Text turn: no `skipping speculative prime` line; `statistics mtp` shows
    `#gen drafts > 0`, `#acc tokens > 0`; generation correct.
-2. Image turn: `skipping speculative prime for multimodal prompt` logged for the
-   prime; drafting still occurs during generation; image described correctly.
-3. Without `--mmproj`: unchanged; MTP drafts as before.
+2. Image turn: image is described correctly and speculative synchronization is
+   invalidated safely.
+3. Following text turn: target and draft rebuild together before drafting resumes.
+4. Without `--mmproj`: unchanged; MTP drafts as before.
 
 Confirmed result: `statistics mtp: #calls(b,g,a) = 1 634 459, #gen drafts = 634,
 #acc drafts = 459, #gen tokens = 1268, #acc tokens = 804`.

@@ -27,7 +27,7 @@ RUNS="${RUNS:-3}"
 CTX="${CTX:-8192}"
 # Speculative knobs (only used for nextn modes). DRAFT_MAX=2 + DRAFT_MIN=1 matches
 # the async pipeline depth-2 sweet spot on Apple Silicon Metal (worker overlaps
-# one draft decode with one target verify, same as Gemma MTP DRAFT_BLOCK_SIZE=2).
+# one draft decode with one target verification).
 # Override via env to sweep, e.g. DRAFT_MAX=8 bash scripts/bench-matrix-qwen.sh.
 DRAFT_MAX="${DRAFT_MAX:-2}"
 DRAFT_MIN="${DRAFT_MIN:-1}"

@@ -3,13 +3,11 @@
 # Override paths via MAIN_GGUF, DRAFT_GGUF, or LLAMA_SERVER.
 #
 # MTP_PRESET (ordered-embeddings MTP is heavy on Edge):
-#   throughput — block 2, max 6
-#   lift       — block 3, max 8
-#   balanced   — block 3, max 8
-#   quality    — block 4, max 16 (max depth; best when acceptance is high)
-# Override with DRAFT_BLOCK_SIZE, DRAFT_MAX. Optional: export LLAMA_MTP_SKIP_STREAK_THRESHOLD=1–32
-# to skip drafting after consecutive zero-accept MTP batches (off by default in the binary).
-
+#   throughput — draft depth 6
+#   lift       — draft depth 8
+#   balanced   — draft depth 8
+#   quality    — draft depth 16 (best when acceptance is high)
+# Override with DRAFT_MAX.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,24 +29,19 @@ VERIFY_ASSISTANT_GGUF="${VERIFY_ASSISTANT_GGUF:-1}"
 MTP_PRESET="${MTP_PRESET:-throughput}"
 case "$MTP_PRESET" in
   throughput)
-    : "${DRAFT_BLOCK_SIZE:=2}"
     : "${DRAFT_MAX:=6}"
     ;;
   lift)
-    : "${DRAFT_BLOCK_SIZE:=3}"
     : "${DRAFT_MAX:=8}"
     ;;
   balanced)
-    : "${DRAFT_BLOCK_SIZE:=3}"
     : "${DRAFT_MAX:=8}"
     ;;
   quality)
-    : "${DRAFT_BLOCK_SIZE:=4}"
     : "${DRAFT_MAX:=16}"
     ;;
   *)
     echo "warn: unknown MTP_PRESET=${MTP_PRESET}; using throughput defaults" >&2
-    : "${DRAFT_BLOCK_SIZE:=2}"
     : "${DRAFT_MAX:=6}"
     ;;
 esac
@@ -111,15 +104,15 @@ ARGS=(
   --parallel "$PARALLEL"
   -np "$PARALLEL"
   --cont-batching
+  --context-shift
 )
 
 if [[ "$SPEC" == "mtp" ]]; then
   ARGS+=(
-    --mtp-head "$DRAFT"
-    --spec-type mtp
-    --draft-block-size "${DRAFT_BLOCK_SIZE}"
-    --draft-max "${DRAFT_MAX}"
-    --draft-min "${DRAFT_MIN:-0}"
+    --model-draft "$DRAFT"
+    --spec-type draft-mtp
+    --spec-draft-n-max "${DRAFT_MAX}"
+    --spec-draft-n-min "${DRAFT_MIN:-0}"
   )
 else
   echo "info: speculative decoding disabled (SPEC=${SPEC}); running baseline" >&2
@@ -135,7 +128,7 @@ fi
 [[ "$LOG_PREFIX"      != "0" ]] && ARGS+=(--log-prefix)
 [[ "$NO_WARMUP"       != "0" ]] && ARGS+=(--no-warmup)
 
-echo "info: SPEC=${SPEC} MTP_PRESET=${MTP_PRESET} DRAFT_BLOCK_SIZE=${DRAFT_BLOCK_SIZE} DRAFT_MAX=${DRAFT_MAX} LLAMA_MTP_SKIP_STREAK_THRESHOLD=${LLAMA_MTP_SKIP_STREAK_THRESHOLD:-}" >&2
+echo "info: SPEC=${SPEC} MTP_PRESET=${MTP_PRESET} DRAFT_MAX=${DRAFT_MAX}" >&2
 echo "info: CTX=${CTX} NGL=${NGL} FA=${FA} CTK=${CTK} CTKD=${CTKD}" >&2
 echo "info: MAIN=${MAIN}" >&2
 echo "info: DRAFT=${DRAFT}" >&2

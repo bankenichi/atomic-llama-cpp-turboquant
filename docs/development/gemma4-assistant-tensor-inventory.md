@@ -33,7 +33,7 @@ This document records the expected tensor layout for `Gemma4AssistantForCausalLM
 
 ## Notes for llama.cpp port
 
-1. MTP consumes **target K/V** for the last sliding-attention and last full-attention layers; the assistant has **no independent KV** in the reference design. The initial C++ integration uses the assistant as a loadable arch with standard KV for bring-up; full KV sharing is wired through `--spec-type mtp` and remains dependent on target/draft pairing and cache layout.
+1. MTP consumes **target K/V** for the last sliding-attention and last full-attention layers; the assistant has **no independent KV** in the reference design. The assistant remains a loadable architecture, while target/draft pairing and cache coordination are wired through the current `--spec-type draft-mtp` driver.
 2. `attention_k_eq_v: true` maps to missing `blk.*.attn_v.weight` (V taken from K), matching Gemma 4 handling in `gemma4-iswa.cpp`.
 3. Greedy parity with the target requires byte-identical drafting; validate with `tests/test-speculative-mtp` when model paths are available.
 

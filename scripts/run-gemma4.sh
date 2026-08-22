@@ -99,6 +99,7 @@ ARGS=(
   --cont-batching
   --metrics
   --slots
+  --context-shift
 )
 
 if [[ "$SPEC" == "mtp" ]]; then
@@ -106,11 +107,10 @@ if [[ "$SPEC" == "mtp" ]]; then
     -ngld "$NGL_DRAFT"
     -ctkd "$CTKD"
     -ctvd "$CTVD"
-    --mtp-head "$DRAFT"
-    --spec-type mtp
-    --draft-block-size "${DRAFT_BLOCK_SIZE:-4}"
-    --draft-max "${DRAFT_MAX:-16}"
-    --draft-min "${DRAFT_MIN:-0}"
+    --model-draft "$DRAFT"
+    --spec-type draft-mtp
+    --spec-draft-n-max "${DRAFT_MAX:-2}"
+    --spec-draft-n-min "${DRAFT_MIN:-0}"
   )
 fi
 

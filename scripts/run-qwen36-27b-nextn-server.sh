@@ -5,8 +5,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER="${LLAMA_SERVER:-${ROOT}/build/bin/llama-server}"
 MAIN="${MAIN_GGUF:-${ROOT}/.scratch/qwen3-6-27b/qwen3-6-27b-q8_0.gguf}"
-DRAFT="${DRAFT_GGUF:-$MAIN}"
-
 VERIFY_GGUF="${VERIFY_NEXTN_GGUF:-1}"
 
 CTX="${CTX:-32768}"
@@ -37,10 +35,6 @@ if [[ ! -f "$MAIN" ]]; then
 fi
 
 if [[ "$SPEC" == "nextn" ]]; then
-  if [[ ! -f "$DRAFT" ]]; then
-    echo "error: draft path not found: ${DRAFT}" >&2
-    exit 1
-  fi
   if [[ "$VERIFY_GGUF" != "0" ]]; then
     python3 "${ROOT}/scripts/verify-qwen36-nextn-gguf.py" "$MAIN" || exit 1
   fi
@@ -63,14 +57,14 @@ ARGS=(
   --parallel "$PARALLEL"
   -np "$PARALLEL"
   --cont-batching
+  --context-shift
 )
 
 if [[ "$SPEC" == "nextn" ]]; then
   ARGS+=(
-    -md "$DRAFT"
-    --spec-type nextn
-    --draft-max "${DRAFT_MAX:-16}"
-    --draft-min "${DRAFT_MIN:-0}"
+    --spec-type draft-mtp
+    --spec-draft-n-max "${DRAFT_MAX:-2}"
+    --spec-draft-n-min "${DRAFT_MIN:-0}"
   )
 else
   echo "info: speculative decoding disabled (SPEC=${SPEC}); running baseline" >&2
@@ -84,5 +78,4 @@ fi
 
 echo "info: SPEC=${SPEC} CTX=${CTX} NGL=${NGL} FA=${FA} CTK=${CTK} CTKD=${CTKD}" >&2
 echo "info: MAIN=${MAIN}" >&2
-echo "info: DRAFT=${DRAFT}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

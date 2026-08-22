@@ -1,8 +1,12 @@
 # Fix: MTP/NextN speculative decoding on text turns when `--mmproj` is loaded
 
+> Historical investigation log. Current operation uses `--spec-type draft-mtp`,
+> `--model-draft` for external Gemma assistants, and `--spec-draft-n-max`.
+> See [`upstream-prism-convergence.md`](upstream-prism-convergence.md).
+
 ## Problem
 
-With an mmproj loaded (`--mmproj`), `--spec-type mtp` (and `nextn`) never produced
+With an mmproj loaded (`--mmproj`), the former private MTP/NextN drivers never produced
 drafts, even for pure-text turns. Symptom in the server log:
 
 ```
@@ -80,7 +84,8 @@ cmake --build build --config Release -j 4 --target llama-server
 
 ## Test criteria
 
-Run the server **with** `--mmproj`, `--spec-type mtp`, and a valid `--mtp-head`.
+Run the server **with** `--mmproj`, `--spec-type draft-mtp`, and a valid
+`--model-draft` for an external Gemma assistant.
 
 1. **Text-only turn** — send a text prompt with no image.
    - PASS: log does **not** print `skipping speculative prime for multimodal prompt`;
@@ -125,7 +130,7 @@ can stay or revert to `cparams.op_offload`.
 ## (historical) OPEN BUG: MTP crash under `--n-cpu-moe` — investigation log
 
 When the Gemma 4 target is split with `--n-cpu-moe` (required to fit 26B in 16 GB),
-`--spec-type mtp` crashes with a silent access violation on the first draft.
+The historical private MTP path crashed with a silent access violation on the first draft.
 
 ## Localized via LLAMA_MTP_TRACE instrumentation (gated, left in place)
 

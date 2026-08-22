@@ -1,92 +1,84 @@
-# Runtime performance features & usage
+# Runtime performance features
 
-Fork-added performance toggles and speculative-decoding behavior, with exact usage. All are
-runtime-controlled (env vars / CLI flags); defaults preserve upstream behavior except where noted.
-The launcher `run-gemma.ps1` (gitignored) wraps these — the flag map is at the bottom.
-
-Related docs: [`mtp-cpumoe-vision-fixes.md`](mtp-cpumoe-vision-fixes.md) (MTP/vision fixes),
-[`thecodacus-prefetch-mmap-port.md`](thecodacus-prefetch-mmap-port.md) (prefetch/mmap port rationale),
-[`gemma4-12b-vision.md`](gemma4-12b-vision.md) (Gemma 4 12B vision).
+The owner deployment is a single RTX 5080 with 16 GB VRAM. Performance work must
+preserve correctness for vision, speculative decoding, and CPU-offloaded MoE.
 
 ## Quick reference
 
-| Feature | Enable | Requires | Notes |
+| Feature | Enable | Requires | Main trade-off |
 |---|---|---|---|
-| Expert-upload prefetch | env `GGML_SCHED_PREFETCH_EXPERTS=1` (value = slot count, default 3) | `--n-cpu-moe` (op_offload); keep `--no-mmap` | Overlaps expert H2D with compute during prefill. Biggest prefill win. |
-| mmap host-pin | env `GGML_CUDA_REGISTER_HOST=1` | mmap on (i.e. **omit** `--no-mmap`) | Pins mmap CPU weights. Alternative to `--no-mmap`; **negates prefetch** — don't combine. |
-| NextN sync multi-step | default on | `--spec-type nextn --model-draft <gguf>`, `--draft-max N` | Drafts N tokens/round. Async single-step is opt-in via `LLAMA_NEXTN_ASYNC=1`. |
-| TurboQuant KV | `-ctk turbo4 -ctv turbo2 -fa on` | Flash Attention; CUDA recommended | Pads non-128 head widths internally; Turbo K context shifts use transactional reprefill. |
-| Bonsai DSpark | `--spec-type draft-dspark -md <sidecar> --spec-draft-n-max 4` | Matching Bonsai target/sidecar | Text drafts with mmproj loaded; real-media turns fall back safely. |
+| Expert upload prefetch | `GGML_SCHED_PREFETCH_EXPERTS=1` | `--n-cpu-moe`, CUDA async/events | Staging slots consume VRAM |
+| mmap host registration | `GGML_CUDA_REGISTER_HOST=1` | mmap enabled | Pins mapped pages in RAM |
+| Turbo adaptive KV | default; disable with `TURBO_LAYER_ADAPTIVE=0` | Turbo KV | Boundary layers use higher precision |
+| MTP/NextN | `--spec-type draft-mtp --spec-draft-n-max 2` | matching assistant or embedded head | Draft weights/KV consume capacity |
+| DSpark | `--spec-type draft-dspark --model-draft ...` | matching Prism sidecar | Draft context is capped at 4096/slot |
 
----
+## Expert upload prefetch
 
-## 1. Expert-upload prefetch (`GGML_SCHED_PREFETCH_EXPERTS`)
+`GGML_SCHED_PREFETCH_EXPERTS` overlaps H2D transfer of CPU-resident
+`MUL_MAT_ID` expert tensors with computation through a second same-device backend
+instance and event-ordered rotating staging slots.
 
-**What:** during large-batch prefill, uploads offloaded `MUL_MAT_ID` expert tensors through a
-second same-device backend instance (own stream) into rotating event-ordered staging slots, so the
-upload of tensor N+1 overlaps compute of tensor N instead of blocking on the routing-id readback.
-Ported from `thecodacus/llama.cpp`. See AGENTS.md mod #8.
+```powershell
+$env:GGML_SCHED_PREFETCH_EXPERTS = "1"
+llama-server ... --n-cpu-moe 14
+```
 
-**Enable:** `set GGML_SCHED_PREFETCH_EXPERTS=1` (cmd) / `$env:GGML_SCHED_PREFETCH_EXPERTS="1"` (PS).
-Value is the staging-slot count: `1` → default 3 (one MoE layer of look-ahead); higher = more
-overlap at the cost of one max expert-tensor of VRAM per slot.
+The value is the staging-slot count. `1` selects the default of three slots; a
+larger numeric value requests that many slots. The path activates only when op
+offload is active. It is most useful with pinned host allocations, including the
+allocation produced by `--no-mmap`.
 
-**Requires:** `op_offload` active (i.e. `--n-cpu-moe N`) and a backend with async + events (CUDA).
-Only activates on the offloaded-expert path; no effect otherwise.
+## mmap host registration
 
-**Interaction:** the async overlap rides the `cudaMallocHost` pinned buffer that `--no-mmap`
-produces. Keep `--no-mmap` on. Do **not** combine with mmap host-pin (below) — under mmap the
-prefetch gain disappears.
+`GGML_CUDA_REGISTER_HOST=1` calls the backend host-buffer registration function on
+the mmap pages retained for CPU weights. The Windows implementation aligns ranges
+with `GetSystemInfo` before `cudaHostRegister`.
 
-## 2. mmap host-pin (`GGML_CUDA_REGISTER_HOST`)
+```powershell
+$env:GGML_CUDA_REGISTER_HOST = "1"
+llama-server ... # keep mmap enabled; do not pass --no-mmap
+```
 
-**What:** after model load, `cudaHostRegister`s the mmap pages backing CPU-resident weights (via
-the backend's `ggml_backend_register_host_buffer` proc — previously dead code) so H2D expert
-streaming uses DMA. Ported from `thecodacus/llama.cpp`; a fork-added `_WIN32` branch makes it work
-on Windows (the upstream code was POSIX-only). See AGENTS.md mod #9.
+Use this when mmap startup/RAM behavior matters but CPU expert transfers still
+need DMA. Compare it with `--no-mmap` plus expert prefetch; do not assume combining
+both switches is faster.
 
-**Enable:** `$env:GGML_CUDA_REGISTER_HOST="1"` **and** run with mmap on — i.e. **omit** `--no-mmap`
-(register_host only runs inside `if (use_mmap)`). Look for `pinned NNNN.NN MiB of mapped model
-memory` in the load log to confirm it engaged.
+## TurboQuant KV
 
-**When to use:** rarely. `--no-mmap` already puts CPU experts in a pinned `CUDA_Host` buffer, so
-pinning gives no extra prefill speed — its only value is keeping H2D fast while using mmap (lower
-RAM / faster cold start). It **negates the prefetch win**, so use it *instead of* prefetch, not
-alongside (`run-gemma.ps1` warns if both are set).
+Turbo KV types are selected with the normal cache-type arguments:
 
-## 3. NextN (Qwen) speculative decoding — synchronous multi-step
+```text
+-ctk turbo4 -ctv turbo2 -ctkd turbo3 -ctvd turbo3 -fa on
+```
 
-**What:** `common_speculative_state_nextn` drafts up to `--draft-max` tokens per round via a
-synchronous autoregressive loop (the reference MTP behavior). The class also contains an async
-"depth-2" worker that overlaps one draft with the next verify but **caps drafting at 1 token/round**;
-it is no longer the default. See AGENTS.md mod #10.
+Adaptive selection is enabled by default. For Turbo2 V, boundary layers may use
+Q8_0 to protect quality. Bonsai's native attention geometry is 576 K by 512 V;
+with f16 K this becomes a mixed F16/Q8_0 flash-attention pair. CUDA chooses the
+separate-V MMA stride specialization for this layout rather than the DeepSeek MLA
+K-subview specialization.
 
-**Enable:** `--spec-type nextn --model-draft <same-gguf>` (the Qwen MTP/NextN GGUF re-loaded with
-`override_arch`), plus `--draft-max N` for the draft depth (**2 is the sweet spot**; deeper drafts
-lose acceptance). Default on; nothing extra needed beyond the flags.
+Turbo K does not support in-place rotary K shift. The server therefore performs a
+transactional reprefill of the retained prompt window during context shift. See
+[`context-shift-with-vision.md`](context-shift-with-vision.md).
 
-**Async worker (opt-in):** `set LLAMA_NEXTN_ASYNC=1` re-enables the single-step async overlap
-path. Not recommended on CUDA (single-step underperforms multi-step); kept for future work on a
-proper multi-step async pipeline. This is a NextN-only knob — distinct from Gemma MTP's
-`LLAMA_PIPELINE_DEPTH2` (which is unrelated and unaffected).
+## Speculative decoding
 
-**Scope:** NextN-only. Gemma MTP (`--spec-type mtp`, `common_speculative_state_mtp`) is a separate
-class and is unaffected by any of the above.
+Current CLI:
 
-**Direct-run caveat:** without `--draft-max`, the NextN default depth is 16 (over-drafts). Always
-pass `--draft-max 2` when running `llama-server` directly; the launcher sets it for you.
+```text
+--spec-type draft-mtp --spec-draft-n-max 2
+--spec-type draft-dspark --model-draft dspark.gguf --spec-draft-n-max 4
+```
 
----
+Removed names such as `--draft-max`, `--draft-block-size`, `--mtp-head`,
+`--spec-type mtp`, and `--spec-type nextn` must not appear in maintained launchers.
+See [`../../MTP.md`](../../MTP.md), [`../../NEXTN.md`](../../NEXTN.md), and
+[`../speculative.md`](../speculative.md).
 
-## Launcher flag map (`run-gemma.ps1`)
+## Capacity rule
 
-| Wrapper flag | Underlying |
-|---|---|
-| (default, MoE) | `GGML_SCHED_PREFETCH_EXPERTS=1` — prefetch on for 26B/Qwen |
-| `-NoPrefetch` | unset `GGML_SCHED_PREFETCH_EXPERTS` |
-| `-PinHost` | `GGML_CUDA_REGISTER_HOST=1` **and** drops `--no-mmap`; warns if prefetch also on |
-| `-Qwen` | `--spec-type nextn --model-draft <qwen gguf> --draft-max <DraftBlockSize> --context-shift`, `--n-cpu-moe 28`, turbo4/turbo3 KV |
-| `-Qwen -NoSpec` | Qwen without speculative decoding |
-| `-DraftBlockSize N` | Qwen: `--draft-max N` (draft-token count). Gemma MTP: `--draft-block-size N` (drafts N-1) |
-| `-g12` | dense Gemma 4 12B + unsloth mmproj, `q8_0` KV, no MoE/MTP/prefetch |
-| `-Mtp` | Gemma 26B `--spec-type mtp --mtp-head <assistant>` (unaffected by the NextN change) |
+Keep dedicated GPU memory at or below roughly 15 GB. Above that point, transient
+decode buffers can spill to shared system memory and reduce throughput sharply.
+For MoE models, tune `--n-cpu-moe` before changing speculative depth or KV
+precision. A speculative head that displaces a full expert layer may be a net loss.
