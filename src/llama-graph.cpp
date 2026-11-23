@@ -4381,7 +4381,8 @@ ggml_tensor * llm_graph_context::build_rs_cache_view(
     // to order the relocation AFTER the GDN read (build_rs's read-before-write
     // ordering), which is a graph-dependency refactor left as follow-up.
     ggml_tensor * state_zero = ggml_view_1d(ctx0, states, state_size*(rs_zero >= 0), rs_zero*states->nb[1]*(rs_zero >= 0));
-    ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero, 0));
+    // fill, not scale by 0: a scaled NaN stays NaN (upstream #31913 made the same change in build_rs)
+    ggml_build_forward_expand(gf, ggml_fill_inplace(ctx0, state_zero, 0.0f));
 
     // like build_rs with a custom getter: gather from the second state so the node size only depends on n_rs,
     // then take the extra states (between n_seqs and n_rs) as a view of it
