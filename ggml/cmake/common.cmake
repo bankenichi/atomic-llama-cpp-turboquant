@@ -28,6 +28,7 @@ endfunction()
 function(ggml_get_system_arch)
     if (CMAKE_OSX_ARCHITECTURES      STREQUAL "arm64" OR
         CMAKE_GENERATOR_PLATFORM_LWR STREQUAL "arm64" OR
+        (CMAKE_GENERATOR_PLATFORM_LWR STREQUAL "arm64ec" AND MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang") OR
         (NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_GENERATOR_PLATFORM_LWR AND
             CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm.*|ARM64)$"))
         set(GGML_SYSTEM_ARCH "ARM" PARENT_SCOPE)
@@ -47,4 +48,94 @@ function(ggml_get_system_arch)
     else()
         set(GGML_SYSTEM_ARCH "UNKNOWN" PARENT_SCOPE)
     endif()
+endfunction()
+
+# Determines which FlashAttention vector kernel template instances to compile, returns them in OUT_SRCS.
+function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
+    set(FA_TYPES q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16)
+
+    string(TOLOWER "${GGML_CUDA_FA_QUANTS}" FA_QUANTS)
+    string(STRIP   "${FA_QUANTS}" FA_QUANTS)
+    if (GGML_CUDA_FA_ALL_QUANTS)
+        message(WARNING "GGML_CUDA_FA_ALL_QUANTS is deprecated, use GGML_CUDA_FA_QUANTS=all instead")
+        set(FA_QUANTS all)
+    endif()
+    if (NOT FA_QUANTS)
+        message(FATAL_ERROR "GGML_CUDA_FA_QUANTS must not be empty")
+    endif()
+
+    if (FA_QUANTS STREQUAL "all")
+        set(FA_COMBINATIONS "")
+        foreach (TYPE_V IN LISTS FA_TYPES)
+            foreach (TYPE_K IN LISTS FA_TYPES)
+                list(APPEND FA_COMBINATIONS ${TYPE_K}-${TYPE_V})
+            endforeach()
+        endforeach()
+    else()
+        set(FA_COMBINATIONS f16-f16)
+
+        string(REPLACE "," ";" FA_SELECTED "${FA_QUANTS}")
+        foreach (COMBINATION IN LISTS FA_SELECTED)
+            string(STRIP   "${COMBINATION}" COMBINATION)
+            if (NOT COMBINATION MATCHES "^([a-z0-9_]+)-([a-z0-9_]+)$")
+                message(FATAL_ERROR "GGML_CUDA_FA_QUANTS: \"${COMBINATION}\" is not \"all\" or a <type_K>-<type_V> combination")
+            endif()
+            set(TYPE_K ${CMAKE_MATCH_1})
+            set(TYPE_V ${CMAKE_MATCH_2})
+            foreach (TYPE ${TYPE_K} ${TYPE_V})
+                if (NOT TYPE IN_LIST FA_TYPES)
+                    message(FATAL_ERROR
+                        "GGML_CUDA_FA_QUANTS: unknown type \"${TYPE}\" in \"${COMBINATION}\", must be one of: ${FA_TYPES}")
+                endif()
+            endforeach()
+            list(APPEND FA_COMBINATIONS ${TYPE_K}-${TYPE_V})
+        endforeach()
+    endif()
+    # Personal fork: Turbo2's default adaptive policy promotes Bonsai boundary V
+    # layers to Q8_0 while K stays F16, so this mixed pair must be compiled even
+    # in a restricted build (see the 576x512 F16/Q8_0 test in test-backend-ops).
+    list(APPEND FA_COMBINATIONS f16-q8_0)
+    list(REMOVE_DUPLICATES FA_COMBINATIONS)
+
+    string(REPLACE ";" "," FA_QUANTS_DEFINE "${FA_QUANTS}")
+    add_compile_definitions(GGML_CUDA_FA_QUANTS="${FA_QUANTS_DEFINE}")
+    foreach (TYPE_V IN LISTS FA_TYPES)
+        foreach (TYPE_K IN LISTS FA_TYPES)
+            if ("${TYPE_K}-${TYPE_V}" IN_LIST FA_COMBINATIONS)
+                set(COMPILED 1)
+            else()
+                set(COMPILED 0)
+            endif()
+            string(TOUPPER "GGML_CUDA_FA_${TYPE_K}_${TYPE_V}" COMBINATION_DEF)
+            add_compile_definitions(${COMBINATION_DEF}=${COMPILED})
+        endforeach()
+    endforeach()
+
+    message(STATUS "FlashAttention K-V type combinations: ${FA_COMBINATIONS}")
+
+    set(SRCS "")
+    foreach (COMBINATION IN LISTS FA_COMBINATIONS)
+        set(SRC "${DIR}/template-instances/fattn-vec-instance-${COMBINATION}.cu")
+        if (NOT EXISTS "${SRC}")
+            message(FATAL_ERROR "FlashAttention template instance \"${SRC}\" does not exist")
+        endif()
+        list(APPEND SRCS "${SRC}")
+    endforeach()
+
+    # Personal fork: TurboQuant KV pairs are always compiled. They are not part of
+    # FA_TYPES because GGML_CUDA_FA_QUANTS only selects upstream types; fattn.cu
+    # dispatches them through FATTN_VEC_CASES_ALL_D_ALWAYS.
+    foreach (COMBINATION
+            turbo3_0-turbo3_0 turbo3_0-q8_0 q8_0-turbo3_0 f16-turbo3_0
+            turbo2_0-turbo2_0 turbo2_0-q8_0 q8_0-turbo2_0 f16-turbo2_0 turbo3_0-turbo2_0 turbo2_0-turbo3_0
+            turbo4_0-turbo4_0 turbo4_0-q8_0 q8_0-turbo4_0 f16-turbo4_0 turbo4_0-turbo3_0 turbo3_0-turbo4_0
+            turbo4_0-turbo2_0 turbo2_0-turbo4_0)
+        set(SRC "${DIR}/template-instances/fattn-vec-instance-${COMBINATION}.cu")
+        if (NOT EXISTS "${SRC}")
+            message(FATAL_ERROR "TurboQuant FlashAttention template instance \"${SRC}\" does not exist")
+        endif()
+        list(APPEND SRCS "${SRC}")
+    endforeach()
+
+    set(${OUT_SRCS} ${SRCS} PARENT_SCOPE)
 endfunction()

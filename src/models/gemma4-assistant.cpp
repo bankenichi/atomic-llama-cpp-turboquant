@@ -4,7 +4,7 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
     hparams.n_embd_inp_impl = hparams.n_embd_out();
 
     hparams.swa_type = LLAMA_SWA_TYPE_STANDARD;
-    ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer());
+    ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl);
 
     uint32_t n_kv_shared_layers = 0;
     ml.get_key(LLM_KV_ATTENTION_SHARED_KV_LAYERS, n_kv_shared_layers, false);
@@ -28,9 +28,12 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
         ml.get_key(LLM_KV_GEMMA4_ASSISTANT_USE_ORDERED_EMBEDDINGS, hparams.use_ordered_embeddings, false);
     }
 
-    if (!ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false) && legacy_mtp) {
-        // The original assistant format used block_count as the MTP depth and
-        // predates the generic nextn_predict_layers metadata key.
+    // The base loader now reads nextn_predict_layers before the architecture
+    // hparams (upstream #28159). The original assistant format predates that key
+    // and used block_count as the MTP depth, so a legacy file arrives here with
+    // n_layer_nextn == 0. Only the base loader's n_layer_all-sized arrays run
+    // before this point, so fixing the depth here is still early enough.
+    if (legacy_mtp && hparams.n_layer_nextn == 0) {
         hparams.n_layer_nextn = hparams.n_layer_all;
     }
     GGML_ASSERT(hparams.n_layer_nextn == hparams.n_layer_all && "n_layer_nextn must be == n_layer_impl");
