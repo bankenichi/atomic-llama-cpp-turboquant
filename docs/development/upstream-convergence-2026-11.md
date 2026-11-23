@@ -24,8 +24,9 @@ Merge points:
 1. `8098b4779` Merge upstream b11392 (`46847e615`). Validated (see below).
 2. `fafb88636` Merge upstream b11889 (`d854d98ba`, Prism's own upstream base),
    plus `c55ebc739` fix(cuda) for the group-128 MMQ loader API.
-   CUDA tool suite builds (502/502); CTest and backend-ops running unattended
-   (see "Running jobs").
+   Validated: CUDA tool suite builds (502/502); CTest 49/50 (only
+   test-quant-type-selection, same remote `ggml-org/Qwen3.6-27B-GGUF` drift:
+   merged `attn_qkv_gate` tensors); `test-backend-ops test -b CUDA0` 19227/19227.
 3. Branch `wip/convergence-m3` (worktree `C:\Users\kenic\Documents\acl-wt`):
    `e56b44cf7` refactor (Q2_0_G128 -> Prism's PQ2_0 names, id 142 unchanged),
    `9b99a704d` Merge `prism/prism`. Committed, **not built yet**.
@@ -99,7 +100,7 @@ test. Remove the worktree afterwards (`git worktree remove`).
   `build-converge`). CTest 47/48 (only quant-type-selection, see above).
   `test-backend-ops test -b CUDA0`: 17192/17192 passed, including the 576x512
   F16-K/Q8_0-V separate-V and Q8/Q8 K-subview cases, Turbo SET_ROWS, TURBO_WHT.
-- Stage 2: build in progress. Stages 3-4: not built. CPU build, acceptance runs
+- Stage 2 (`fafb88636` + `c55ebc739`): validated as above. Stages 3-4: not built. CPU build, acceptance runs
   and the Granite check: not started.
 
 ### Build recipe used
@@ -121,9 +122,8 @@ stage: use the upstream tag of the merged tip (b12643) or `latest`.
 ### Running jobs
 
 - Stage 2 build finished OK (`build-m2b.log`, `exit=0`).
-- Stage 2 CTest then `test-backend-ops test -b CUDA0`, started unattended; logs in
-  `C:\Users\kenic\AppData\Local\Temp\claude\ec5fee28b324d4b7\47cec40e-c522-4cb0-ac80-6091b0e5cb46\scratchpad\`:
-  `ctest-m2.log` and `tbo-m2.log` (each ends with `exit=<code>`).
+- Stage 2 CTest and backend-ops finished (results above; logs `ctest-m2.log`,
+  `tbo-m2.log` in the session scratchpad). No jobs running.
 
 ### Still to do after stage 4
 
