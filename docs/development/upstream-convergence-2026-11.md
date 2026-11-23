@@ -159,6 +159,12 @@ happens only when no prompt-cache entry shares the checkpoint.
   not used by the fork's drivers. This is a performance difference only; the
   host path is unchanged.
 - Upstream's few-row MMQ is off in batch-invariant mode by design.
+- Chained MTP drafts (opt-in, `LLAMA_MTP_CHAIN=1`) are declined on a context that
+  uses upstream's `kv_rows` attention (unified KV cache with flash attention, which
+  includes the server's default 4-slot setup): the chain slices one mask over the
+  whole cache, while `kv_rows` masks follow each sequence's cell list. The draft
+  context logs this once; MTP drafting itself runs unchained. A non-unified cache
+  (for example `--parallel 1`) or `LLAMA_KV_ROWS_DISABLE=1` keeps the chain.
 - WebGPU: Prism's 8-column mat-vec routing (#301) is not carried over (untested
   backend).
 - Prism's ARC-LAB `LLAMA_SYNC_TRIM` bit 2 (device copies of the attention

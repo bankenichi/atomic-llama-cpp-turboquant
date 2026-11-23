@@ -499,6 +499,7 @@ private:
     ggml_context_ptr        mtp_chain_ctx;
     ggml_backend_buffer_ptr mtp_chain_buf;
     bool                    mtp_chain_embd_tried = false;
+    mutable bool            mtp_chain_rows_logged = false; // mtp_chain_support() declined because of kv_rows (logged once)
     std::vector<int32_t>    mtp_chain_vocab;   // draft-head index -> token id (empty: no draft head, indices are tokens)
     std::vector<int32_t>    mtp_chain_out;
     std::vector<int32_t>    mtp_chain_tok;     // mtp_chain_out mapped to token ids

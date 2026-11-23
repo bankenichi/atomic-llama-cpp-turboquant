@@ -1808,6 +1808,11 @@ int32_t llama_context::mtp_chain_support() const {
     }
     // the chain slices one mask over the whole cache; kv_rows masks (ggml_flash_attn_ext_rows) are laid out per cell list
     if (cparams.fused_kv_rows) {
+        if (!mtp_chain_rows_logged) {
+            mtp_chain_rows_logged = true;
+            LLAMA_LOG_INFO("%s: chained MTP drafts are not available: the unified KV cache attends through kv_rows "
+                    "(a non-unified cache or LLAMA_KV_ROWS_DISABLE=1 allows them)\n", __func__);
+        }
         return 0;
     }
     const auto & layer = model.layers[model.hparams.n_layer()];
