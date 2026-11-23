@@ -1472,10 +1472,10 @@ static std::vector<uint8_t> make_legacy_q2_type42_gguf(legacy_q2_layout layout) 
 
     std::vector<ggml_type> physical_types;
     if (mixed) {
-        physical_types = { GGML_TYPE_Q2_0, GGML_TYPE_Q2_0_G128, GGML_TYPE_I8 };
+        physical_types = { GGML_TYPE_Q2_0, GGML_TYPE_PQ2_0, GGML_TYPE_I8 };
     } else {
         physical_types = {
-            layout == LEGACY_Q2_GROUP128 ? GGML_TYPE_Q2_0_G128 : GGML_TYPE_Q2_0,
+            layout == LEGACY_Q2_GROUP128 ? GGML_TYPE_PQ2_0 : GGML_TYPE_Q2_0,
             GGML_TYPE_I8,
         };
     }
@@ -1539,7 +1539,7 @@ static std::pair<int, int> test_legacy_q2_type42_normalization() {
     };
 
     run(LEGACY_Q2_GROUP64,   GGML_TYPE_Q2_0,      true);
-    run(LEGACY_Q2_GROUP128,  GGML_TYPE_Q2_0_G128, true);
+    run(LEGACY_Q2_GROUP128,  GGML_TYPE_PQ2_0, true);
     run(LEGACY_Q2_MIXED,     GGML_TYPE_Q2_0,      false);
     // Raw type 42 is standardized as group-64. With no decisive physical span
     // or trustworthy metadata discriminator, ambiguity must retain that meaning.

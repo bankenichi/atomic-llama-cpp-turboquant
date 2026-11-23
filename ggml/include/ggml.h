@@ -433,7 +433,7 @@ extern "C" {
         // Prism group-128 Q2_0. Upstream type 42 remains the distinct group-64
         // encoding; historical Bonsai files using type 42 with this layout are
         // normalized by the GGUF loader after physical-layout validation.
-        GGML_TYPE_Q2_0_G128 = 142,
+        GGML_TYPE_PQ2_0 = 142,
 
         // Personal-fork private types. Keep these out of the upstream/Prism GGUF
         // type range. Legacy on-disk IDs 43-46 are normalized by the GGUF reader.
@@ -502,7 +502,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
-        GGML_FTYPE_MOSTLY_Q2_0_G128 = 142, // except 1d tensors (Prism-private group-128 Q2_0)
+        GGML_FTYPE_MOSTLY_PQ2_0 = 142, // except 1d tensors (Prism-private group-128 Q2_0)
     };
 
     // available tensor operations:
