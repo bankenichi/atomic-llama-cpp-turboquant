@@ -894,6 +894,14 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
                 ok = false;
                 break;
             }
+            // ids inside the range that no type occupies (removed types, the free upstream slot 44, the gaps
+            // before the fork's 1xx/24x blocks) have no traits: reject them by name instead of reporting a
+            // NULL type name with block size 0
+            if (ggml_blck_size(ggml_type(type)) == 0) {
+                GGML_LOG_ERROR("%s: tensor '%s' has unassigned ggml type id %d\n", __func__, info.t.name, type);
+                ok = false;
+                break;
+            }
             info.t.type = ggml_type(type);
             const size_t  type_size = ggml_type_size(info.t.type);
             const int64_t blck_size = ggml_blck_size(info.t.type);

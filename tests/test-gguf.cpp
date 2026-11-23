@@ -1618,10 +1618,21 @@ static std::pair<int, int> test_legacy_private_type_normalization() {
         ntest++;
     }
     {
+        // the error must name the id as unassigned (it once read "type 44 ((null)) ... not a multiple of block size (0)")
+        std::string log;
+        ggml_log_set([](ggml_log_level, const char * text, void * user_data) {
+            *static_cast<std::string *>(user_data) += text;
+        }, &log);
         std::vector<uint8_t> data = make_raw_type_gguf({ 44 }, { GGML_TYPE_TURBO4_0 }, 128);
         gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
-        const bool ok = ctx == nullptr;
-        printf("%s: unassigned raw 44 is rejected: %s\n", __func__, ok ? "OK" : "FAIL");
+        ggml_log_set(nullptr, nullptr);
+        const bool rejected = ctx == nullptr;
+        const bool clear    = log.find("unassigned ggml type id 44") != std::string::npos && log.find("(null)") == std::string::npos;
+        const bool ok       = rejected && clear;
+        printf("%s: unassigned raw 44 is rejected with a clear error: %s\n", __func__, ok ? "OK" : "FAIL");
+        if (!clear) {
+            printf("%s:   log was: %s", __func__, log.c_str());
+        }
         gguf_free(ctx);
         npass += ok;
         ntest++;
