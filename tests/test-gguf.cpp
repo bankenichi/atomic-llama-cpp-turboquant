@@ -1556,55 +1556,80 @@ static std::pair<int, int> test_legacy_q2_type42_normalization() {
     return std::make_pair(npass, ntest);
 }
 
-static std::pair<int, int> test_legacy_private_type_normalization() {
+// Builds a minimal one-dimensional GGUF whose tensors carry the given raw type
+// ids and lays out their data for the given physical types.
+static std::vector<uint8_t> make_raw_type_gguf(
+        const std::vector<int32_t> & raw_types, const std::vector<ggml_type> & physical_types, int64_t ne) {
     constexpr uint32_t alignment = GGUF_DEFAULT_ALIGNMENT;
-    const std::vector<ggml_type> physical_types = {
-        GGML_TYPE_TURBO3_0,
-        GGML_TYPE_TURBO4_0,
-        GGML_TYPE_TQ3_1S,
-        GGML_TYPE_TQ4_1S,
-    };
 
     std::vector<uint64_t> offsets(physical_types.size());
     uint64_t data_size = 0;
     for (size_t i = 0; i < physical_types.size(); ++i) {
         offsets[i] = data_size;
-        const int64_t ne = i < 2 ? 128 : 32;
         data_size += GGML_PAD(ggml_row_size(physical_types[i], ne), alignment);
     }
 
     std::vector<uint8_t> data;
     helper_append(data, GGUF_MAGIC, 4);
     helper_append(data, uint32_t(GGUF_VERSION));
-    helper_append(data, uint64_t(physical_types.size()));
+    helper_append(data, uint64_t(raw_types.size()));
     helper_append(data, uint64_t(0));
 
-    for (size_t i = 0; i < physical_types.size(); ++i) {
+    for (size_t i = 0; i < raw_types.size(); ++i) {
         const std::string name = "legacy_private_" + std::to_string(i);
         helper_append(data, uint64_t(name.size()));
         helper_append(data, name.data(), name.size());
         helper_append(data, uint32_t(1));
-        helper_append(data, int64_t(i < 2 ? 128 : 32));
-        helper_append(data, int32_t(43 + i));
+        helper_append(data, int64_t(ne));
+        helper_append(data, raw_types[i]);
         helper_append(data, offsets[i]);
     }
 
     data.resize(GGML_PAD(data.size(), alignment), 0);
     data.resize(data.size() + data_size, 0);
+    return data;
+}
 
+// The fork's TQ3_1S/TQ4_1S weights were once stored as raw 45/46 and must keep
+// loading. Raw 43 is upstream F8_E4M3 and must never be remapped to the old
+// private Turbo3 id; raw 44 (old Turbo4, never written into model files) is
+// not claimed and must be rejected rather than reinterpreted.
+static std::pair<int, int> test_legacy_private_type_normalization() {
     const gguf_init_params params = {
         /*.no_alloc =*/ true,
         /*.ctx      =*/ nullptr,
     };
-    gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
-    bool ok = ctx != nullptr;
-    for (size_t i = 0; ok && i < physical_types.size(); ++i) {
-        ok = gguf_get_tensor_type(ctx, i) == physical_types[i];
+
+    int npass = 0;
+    int ntest = 0;
+
+    {
+        const std::vector<int32_t>   raw_types      = { 43, 45, 46 };
+        const std::vector<ggml_type> physical_types = { GGML_TYPE_F8_E4M3, GGML_TYPE_TQ3_1S, GGML_TYPE_TQ4_1S };
+        std::vector<uint8_t> data = make_raw_type_gguf(raw_types, physical_types, 128);
+        gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
+        bool ok = ctx != nullptr;
+        for (size_t i = 0; ok && i < physical_types.size(); ++i) {
+            ok = gguf_get_tensor_type(ctx, i) == physical_types[i];
+        }
+        printf("%s: raw 43 stays F8_E4M3, raw 45/46 normalize to TQ3_1S/TQ4_1S: %s
+", __func__, ok ? "OK" : "FAIL");
+        gguf_free(ctx);
+        npass += ok;
+        ntest++;
+    }
+    {
+        std::vector<uint8_t> data = make_raw_type_gguf({ 44 }, { GGML_TYPE_TURBO4_0 }, 128);
+        gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
+        const bool ok = ctx == nullptr;
+        printf("%s: unassigned raw 44 is rejected: %s
+", __func__, ok ? "OK" : "FAIL");
+        gguf_free(ctx);
+        npass += ok;
+        ntest++;
     }
 
-    printf("%s: %s\n", __func__, ok ? "OK" : "FAIL");
-    gguf_free(ctx);
-    return { ok ? 1 : 0, 1 };
+    return { npass, ntest };
 }
 
 int main(int argc, char ** argv) {

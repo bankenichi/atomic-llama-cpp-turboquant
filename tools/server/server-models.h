@@ -5,8 +5,11 @@
 #include "preset.h"
 #include "server-common.h"
 #include "server-http.h"
+#include "server-models-sched.h"
 #include "server-queue.h"
 
+#include <atomic>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -86,6 +89,9 @@ struct server_model_meta {
     json architecture = server_model_architecture_json(false, false, false, {"text"});
     uint32_t n_ctx_train = 0; // trained context, read from the GGUF metadata; 0 when unknown
 
+    // only populated with --models-memory-margin, see server_models_sched
+    server_model_memory_info memory = {};
+
     bool is_ready() const {
         return status == SERVER_MODEL_STATUS_LOADED;
     }
@@ -151,13 +157,31 @@ private:
     void delete_partials(const std::vector<common_download_partial> & parts);
 };
 
+// broadcasts model events to the clients of GET /models/sse, used by both router and single-model mode
+struct server_models_sse {
+    // send the last event to each new client, for single-model mode where GET /models is unavailable while loading
+    const bool replay_last;
+
+    server_models_sse(bool replay_last = false) : replay_last(replay_last) {}
+
+    // thread-safe
+    void notify(const std::string & event, const std::string & model_id, const json & data = nullptr);
+
+    // handler for GET /models/sse, a client is disconnected once should_stop() returns true
+    server_http_context::handler_t make_handler(std::function<bool()> should_stop);
+
+private:
+    std::mutex      mutex;
+    json            last_event;
+    server_response queue;
+};
+
 struct server_models_routes;
-struct server_lru_sched; // defined in server-models.cpp
-struct server_monitor;   // defined in server-models.cpp
+struct server_monitor; // defined in server-models.cpp
 
 struct server_models {
     friend struct server_models_routes;
-    friend struct server_lru_sched;
+    friend struct server_models_sched;
     friend struct server_monitor;
 
 private:
@@ -165,6 +189,7 @@ private:
         std::shared_ptr<server_subproc> subproc; // shared with the monitor thread
         server_model_meta meta;
         int req_count = 0; // number of active proxy requests
+        bool download_stop_requested = false; // a client asked the download to stop (pause or cancel)
 
         // ask the child to exit (it handles the command on its stdin, see server_role::setup)
         void request_exit() const;
@@ -252,16 +277,13 @@ private:
     std::vector<std::string> base_env;
     common_preset base_preset; // base preset from llama-server CLI args
 
-    // queue of requests waiting for a models_max slot
-    std::unique_ptr<server_lru_sched> sched;
+    // request queue (models_max) and memory accounting
+    std::unique_ptr<server_models_sched> sched;
 
     // if true, add some delay to simulate works (useful for testing)
     bool debug_fake_timing = false;
 
     void update_meta(const std::string & name, const server_model_meta & meta);
-
-    // unload least recently used models if the limit is reached
-    void unload_lru();
 
     // not thread-safe, caller must hold mutex
     void add_model(server_model_meta && meta);
@@ -269,6 +291,9 @@ private:
     // ask the monitor to stop a running instance; send_exit is false for a child that was already force-killed
     // not thread-safe, caller must hold mutex
     void request_stop(const std::string & name, bool send_exit = true);
+
+    // let the monitor watch a child; kill_after > 0 force-kills it after that many seconds
+    void watch_child(const std::string & name, std::shared_ptr<server_subproc> proc, server_role_type role, int port, int kill_after = 0);
 
     // called by the monitor once a child exited and was reaped
     void on_child_exit(const std::string & name, const std::shared_ptr<server_subproc> & proc, server_role_type role, int exit_code);
@@ -283,7 +308,7 @@ public:
     server_models(const common_params & params, int argc, char ** argv);
     ~server_models();
 
-    server_response sse; // for real-time updates via SSE endpoint
+    server_models_sse sse; // for real-time updates via SSE endpoint
 
     // (re-)load the list of models from various sources and prepare the metadata mapping
     // - if this is called the first time, simply populate the metadata
@@ -336,6 +361,7 @@ public:
         int exit_code = 0; // only valid if status == UNLOADED
         json loaded_info = nullptr;
         json progress = nullptr;
+        std::optional<server_model_memory> memory = std::nullopt; // what the instance allocated, sent with READY
     };
     // update the status of a model instance (thread-safe)
     // also send SSE notification to /models/sse endpoint
@@ -369,8 +395,9 @@ public:
     // called from the monitor thread
     // payload per state:
     //     state = loading     -> payload = {} (TODO: add progress info)
-    //     state = ready       -> payload = model_info (json), or {} if wakeup from sleeping
+    //     state = ready       -> payload = model_info (json) with a "memory" field, or {} if wakeup from sleeping
     //     state = sleeping    -> payload = {}
+    //     state = measuring   -> payload = {result: "measured", min, max} or {result: "failed", error}
     void handle_child_state(const std::string & name, const std::string & raw_input);
 
 private:
@@ -436,7 +463,8 @@ struct server_http_proxy : server_http_res {
                       const std::map<std::string, uploaded_file> & files,
                       const std::function<bool()> should_stop,
                       int32_t timeout_read,
-                      int32_t timeout_write
+                      int32_t timeout_write,
+                      const std::string & resolved_addr = "" // if set: connect to this address only, do not follow redirects
                       );
     ~server_http_proxy() {
         if (cleanup_pipes) {

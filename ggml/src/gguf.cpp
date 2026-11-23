@@ -322,24 +322,6 @@ struct gguf_reader {
         return true;
     }
 
-    bool read(enum ggml_type & dst) const {
-        int32_t tmp = -1;
-        if (!read(tmp)) {
-            return false;
-        }
-        dst = ggml_type(tmp);
-        return true;
-    }
-
-    bool read(enum gguf_type & dst) const {
-        int32_t tmp = -1;
-        if (!read(tmp)) {
-            return false;
-        }
-        dst = gguf_type(tmp);
-        return true;
-    }
-
     bool read(std::string & dst) const {
         uint64_t size = 0;
         if (!read(size)) {
@@ -475,14 +457,18 @@ static bool gguf_set_tensor_layout(gguf_tensor_info & info, ggml_type type) {
 }
 
 static ggml_type gguf_normalize_legacy_private_type(int32_t raw_type) {
-    // This fork historically occupied the then-unused GGUF IDs 43-46. They are
-    // unambiguous today and must remain readable after moving the private types
-    // out of the upstream namespace. ID 42 is deliberately handled separately:
-    // old Turbo2 and Prism PQ2_0 have the same 128-value/34-byte physical
-    // layout, and Turbo2 was only ever intended for runtime KV caches.
+    // This fork historically occupied the then-unused GGUF IDs 42-46 (Turbo2,
+    // Turbo3, Turbo4, TQ3_1S, TQ4_1S) before moving its private types to
+    // 240-244. Only the two weight formats were ever written into model files
+    // (llama-quantize offers TQ3_1S/TQ4_1S; the Turbo types are runtime KV-cache
+    // formats), so only 45/46 are normalized.
+    //
+    // Do not add 42-44 back: 42 is upstream group-64 Q2_0 (and legacy Prism
+    // group-128 Q2_0, resolved from tensor spans below), 43 is upstream
+    // F8_E4M3 (ggml-org/llama.cpp #27512), and 44 is the next free upstream
+    // slot. Remapping any of them would silently corrupt valid upstream GGUFs.
+    // If upstream ever assigns 45 or 46, this table must be revisited.
     switch (raw_type) {
-        case 43: return GGML_TYPE_TURBO3_0;
-        case 44: return GGML_TYPE_TURBO4_0;
         case 45: return GGML_TYPE_TQ3_1S;
         case 46: return GGML_TYPE_TQ4_1S;
         default: return static_cast<ggml_type>(raw_type);
@@ -719,7 +705,7 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
 
         for (int64_t i = 0; ok && i < n_kv; ++i) {
             std::string key;
-            gguf_type   type     = gguf_type(-1);
+            int32_t     type     = -1;
             bool        is_array = false;
             uint64_t    n        = 1;
 
@@ -888,22 +874,27 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
 
         // tensor type
         {
-            int32_t raw_type = 0;
-            ok = ok && gr.read(raw_type);
-            info.t.type = gguf_normalize_legacy_private_type(raw_type);
+            int32_t type = -1;
+            ok = ok && gr.read(type);
+            if (!ok) {
+                break;
+            }
 
-            if (ok && static_cast<int32_t>(info.t.type) != raw_type) {
+            const int32_t raw_type = type;
+            type = (int32_t) gguf_normalize_legacy_private_type(raw_type);
+            if (type != raw_type) {
                 GGML_LOG_WARN("%s: normalized legacy private tensor '%s' type %d to %d (%s)\n",
-                        __func__, info.t.name, raw_type, (int) info.t.type, ggml_type_name(info.t.type));
+                        __func__, info.t.name, raw_type, type, ggml_type_name((ggml_type) type));
             }
 
             // check that tensor type is within defined range
-            if (info.t.type < 0 || info.t.type >= GGML_TYPE_COUNT) {
+            if (type < 0 || type >= GGML_TYPE_COUNT) {
                 GGML_LOG_ERROR("%s: tensor '%s' has invalid ggml type %d. should be in [0, %d)\n",
-                    __func__, info.t.name, info.t.type, GGML_TYPE_COUNT);
+                    __func__, info.t.name, type, GGML_TYPE_COUNT);
                 ok = false;
                 break;
             }
+            info.t.type = ggml_type(type);
             const size_t  type_size = ggml_type_size(info.t.type);
             const int64_t blck_size = ggml_blck_size(info.t.type);
 
@@ -1661,6 +1652,7 @@ struct gguf_writer_base {
     // we bet on devirtualization
     virtual void write(int8_t val) = 0;
     virtual void write(const std::vector<int8_t> & val) = 0;
+    virtual void write(const void * data, size_t size) = 0;
     virtual void write_tensor_data(const struct gguf_tensor_info & info, size_t offset_data, size_t alignment) = 0;
 
     template <typename T>
@@ -1777,21 +1769,31 @@ struct gguf_writer_buf final : public gguf_writer_base {
         written_bytes += val.size();
     }
 
+    void write(const void * data, const size_t size) override {
+        buf.insert(buf.end(), (const int8_t *) data, (const int8_t *) data + size);
+        written_bytes += size;
+    }
+
     void write_tensor_data(const struct gguf_tensor_info & info, const size_t offset_data, const size_t alignment) override {
         GGML_ASSERT(buf.size() - offset_data == info.offset);
 
         GGML_ASSERT(ggml_is_contiguous(&info.t));
-        const size_t offset = buf.size();
         const size_t nbytes = ggml_nbytes(&info.t);
 
-        buf.resize(offset + nbytes);
-        if (info.t.buffer) {
-            ggml_backend_tensor_get(&info.t, buf.data() + offset, 0, nbytes);
+        if (info.t.buffer && ggml_backend_buffer_is_host(info.t.buffer)) {
+            GGML_ASSERT(info.t.data != NULL && "tensor not allocated");
+            write(info.t.data, nbytes);
         } else {
-            GGML_ASSERT(info.t.data);
-            memcpy(buf.data() + offset, info.t.data, nbytes);
+            const size_t offset = buf.size();
+            buf.resize(offset + nbytes);
+            if (info.t.buffer) {
+                ggml_backend_tensor_get(&info.t, buf.data() + offset, 0, nbytes);
+            } else {
+                GGML_ASSERT(info.t.data);
+                memcpy(buf.data() + offset, info.t.data, nbytes);
+            }
+            written_bytes += nbytes;
         }
-        written_bytes += nbytes;
 
         pad(alignment);
     }
@@ -1822,20 +1824,33 @@ struct gguf_writer_file final : public gguf_writer_base {
         }
     }
 
+    void write(const void * data, const size_t size) override {
+        const auto ret = fwrite(data, 1, size, file);
+        written_bytes += size;
+        if (ret != size) {
+            throw std::runtime_error("unexpected fwrite number of bytes written, '" + std::to_string(ret) + "' instead of '" + std::to_string(size) + "'");
+        }
+    }
+
     void write_tensor_data(const struct gguf_tensor_info & info, const size_t offset_data, const size_t alignment) override {
         GGML_ASSERT(written_bytes - offset_data == info.offset);
 
         GGML_ASSERT(ggml_is_contiguous(&info.t));
         const size_t nbytes = ggml_nbytes(&info.t);
 
-        std::vector<int8_t> buf(nbytes);
-        if (info.t.buffer) {
-            ggml_backend_tensor_get(&info.t, buf.data(), 0, nbytes);
+        if (info.t.buffer && ggml_backend_buffer_is_host(info.t.buffer)) {
+            GGML_ASSERT(info.t.data != NULL && "tensor not allocated");
+            write(info.t.data, nbytes);
         } else {
-            GGML_ASSERT(info.t.data);
-            memcpy(buf.data(), info.t.data, nbytes);
+            std::vector<int8_t> buf(nbytes);
+            if (info.t.buffer) {
+                ggml_backend_tensor_get(&info.t, buf.data(), 0, nbytes);
+            } else {
+                GGML_ASSERT(info.t.data);
+                memcpy(buf.data(), info.t.data, nbytes);
+            }
+            write(buf);
         }
-        write(buf);
 
         pad(alignment);
     }
