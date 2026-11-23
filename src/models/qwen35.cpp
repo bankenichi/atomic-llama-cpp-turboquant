@@ -530,7 +530,9 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     const bool gdn_rpl = inp->s_rpl_ctrl != nullptr;
 
     // Extra relocation can overwrite a source row before GDN reads it. Multiple sequences also need read-before-write ordering.
-    const bool gdn_state_rows_safe = n_seqs == 1 && mctx_cur->get_n_rs() == 1;
+    // Single-slot contexts only: then the worst-case reserve takes the same path, so the graph topology
+    // does not depend on the ubatch (see llm_graph_context::build_rs)
+    const bool gdn_state_rows_safe = n_seqs == 1 && mctx_cur->get_n_rs() == 1 && cparams.n_seq_max == 1;
     const bool gdn_state_rows_path = cparams.n_rs_seq > 0 || n_seq_tokens == 1;
     const bool gdn_state_rows =
         gdn_state_rows_env && gdn_state_rows_dev_ok && gdn_state_rows_safe && gdn_state_rows_path && !gdn_rpl;

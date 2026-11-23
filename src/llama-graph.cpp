@@ -4274,7 +4274,11 @@ ggml_tensor * llm_graph_context::build_rs(
     ggml_tensor * states_all = ggml_get_rows(ctx0, states, state_copy);
 
     // With one state there is no relocation tail. Keep the direct gather for backend fusions.
-    if (n_rs == 1 && n_seqs == 1 && !get_state_rows) {
+    // Only for single-slot contexts: the recurrent memory then has one cell, so the worst-case reserve
+    // takes this branch too and the graph topology does not depend on the ubatch (with more slots the
+    // reserve gathers n_seq_max states, and a single-sequence decode would build a different graph,
+    // forcing a re-reservation whenever a larger batch follows a smaller one: test-llama-context "rf").
+    if (n_rs == 1 && n_seqs == 1 && cparams.n_seq_max == 1 && !get_state_rows) {
         ggml_build_forward_expand(gf, states_all);
         return states_all;
     }
