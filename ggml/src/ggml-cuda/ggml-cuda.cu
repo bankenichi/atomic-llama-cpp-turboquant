@@ -8462,6 +8462,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (op->type == GGML_TYPE_TURBO4_0 && op->src[0]->ne[0] % 128 != 0) {
                     return false;
                 }
+                // the fork/Prism cache types quantize from F32 rows only (upstream's BF16 source path covers its own types)
+                if ((op->type == GGML_TYPE_TURBO2_0 || op->type == GGML_TYPE_TURBO3_0 || op->type == GGML_TYPE_TURBO4_0 ||
+                     op->type == GGML_TYPE_PQ2_0M) && op->src[0]->type != GGML_TYPE_F32) {
+                    return false;
+                }
                 return (
                            (
                                (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 || op->type == GGML_TYPE_F8_E4M3 ||

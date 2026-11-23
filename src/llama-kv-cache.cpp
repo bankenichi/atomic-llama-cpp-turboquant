@@ -370,7 +370,7 @@ llama_kv_cache::llama_kv_cache(
     // individual tensors point at child buffers, so comparing tensor->buffer with the
     // returned handle can skip initialization. Initialize after every context has been
     // allocated and address each tensor through its own backend buffer.
-    if (turbo_rotation != nullptr && !hparams.no_alloc) {
+    if (turbo_rotation != nullptr && !ctxs_bufs.no_alloc) {
 #include "turbo-rotation-data.h"
         GGML_ASSERT(turbo_rotation->buffer != nullptr);
         GGML_ASSERT(turbo_rotation_inv->buffer != nullptr);
@@ -1453,7 +1453,7 @@ uint32_t llama_kv_cache::get_n_kv_prefix(const slot_info & sinfo, uint32_t n_row
     }
 
     // same padding as get_n_kv
-    const uint32_t n_pad_cur = std::max(n_pad, 256u);
+    const uint32_t n_pad_cur = 256;
 
     return std::min(cells.size(), std::max(n_pad_cur, GGML_PAD(p1, n_pad_cur)));
 }

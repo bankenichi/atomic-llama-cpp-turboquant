@@ -1806,6 +1806,10 @@ int32_t llama_context::mtp_chain_support() const {
     if (kv == nullptr || kv->get_v_trans()) {
         return 0;
     }
+    // the chain slices one mask over the whole cache; kv_rows masks (ggml_flash_attn_ext_rows) are laid out per cell list
+    if (cparams.fused_kv_rows) {
+        return 0;
+    }
     const auto & layer = model.layers[model.hparams.n_layer()];
     // same condition as graph_mtp's draft-head branch
     const bool draft_head = layer.nextn.draft_head && layer.nextn.draft_head_ids && !layer.nextn.shared_head_head &&
@@ -1895,7 +1899,7 @@ llama_context::mtp_chain_entry * llama_context::mtp_chain_entry_for(uint32_t n_t
         synchronize();
         mtp_chain_cache.clear();
     }
-    const size_t max_nodes = graph_max_nodes(std::min(cparams.n_ctx, cparams.n_ubatch));
+    const size_t max_nodes = graph_max_nodes();
     mtp_chain_entry e;
     e.sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false,
                                          cparams.op_offload));

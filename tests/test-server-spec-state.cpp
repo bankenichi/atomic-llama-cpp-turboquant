@@ -1,3 +1,4 @@
+#include "server-slot-sched.h"
 #include "server-spec-state.h"
 #include "server-task.h"
 #include "speculative.h"
@@ -67,7 +68,7 @@ int main() {
     server_prompt current;
     current.tokens = server_tokens(llama_tokens { 1, 2 }, false);
     server_tokens unrelated(llama_tokens { 9, 10 }, false);
-    const auto miss = empty_cache.load(current, unrelated, nullptr, nullptr, 0);
+    const auto miss = empty_cache.load(current, unrelated, {}, nullptr, nullptr, 0);
     assert(miss.success);
     assert(!miss.restored);
     state.restore_from_cache(miss.restored, miss.draft_synchronized);
@@ -83,7 +84,7 @@ int main() {
 
     server_prompt destination;
     server_tokens matching(llama_tokens { 9, 10, 11 }, false);
-    const auto hit = incoherent_cache.load(destination, matching, nullptr, nullptr, 0);
+    const auto hit = incoherent_cache.load(destination, matching, {}, nullptr, nullptr, 0);
     assert(hit.success);
     assert(hit.restored);
     assert(!hit.draft_synchronized);

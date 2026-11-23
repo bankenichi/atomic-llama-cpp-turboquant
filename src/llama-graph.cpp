@@ -4412,6 +4412,7 @@ ggml_tensor * llm_graph_context::build_rs_write_rows(
     GGML_ASSERT(inp->s_write_rows->ne[0] == n_write * n_seqs);
 
     return inp->s_write_rows;
+}
 
 void llm_graph_context::build_conv_state_store(
         llm_graph_input_rs * inp,

@@ -380,7 +380,8 @@ llama_build_and_test(test-arg-parser.cpp  LABEL behavior)
 llama_build_and_test(test-dspark-legacy.cpp  LABEL behavior)
 llama_build_and_test(test-server-spec-state.cpp  LABEL behavior)
 target_include_directories(test-server-spec-state PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
-target_link_libraries(test-server-spec-state PRIVATE server-context)
+# server-context links cpp-httplib privately; server-common.cpp needs it at link time
+target_link_libraries(test-server-spec-state PRIVATE server-context cpp-httplib)
 llama_build_and_test(test-model-resolution.cpp  LABEL behavior)
 llama_build_and_test(test-mtp-catchup-batch.cpp LABEL behavior)
 # the test serves its repos from an httplib server, and the library links it privately

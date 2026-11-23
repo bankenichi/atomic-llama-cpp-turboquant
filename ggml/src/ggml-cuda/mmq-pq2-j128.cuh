@@ -823,17 +823,17 @@ static constexpr size_t ggml_cuda_pq2_j128_smem() {
 }
 
 static bool ggml_cuda_mmq_pq2_j128_supported(const mmq_args & args) {
-    return args.type_x == GGML_TYPE_PQ2_0 && args.ids_dst == nullptr && args.expert_bounds == nullptr &&
+    return args.type_x == GGML_TYPE_PQ2_0 && args.ids_dst == nullptr && args.tile_spec == nullptr &&
         args.y_scale == nullptr &&
         args.nchannels_x == 1 && args.nchannels_y == 1 && args.nsamples_x == 1 && args.nsamples_y == 1 &&
         args.nrows_x % 128 == 0 && args.ncols_x % (2*QK_PQ2_0) == 0 &&
-        args.ncols_dst >= 1 && args.ncols_max == args.ncols_dst &&
+        args.ncols_dst >= 1 &&
         (uintptr_t) args.y % 16 == 0 &&
         args.nrows_x*args.stride_row_x*(int64_t) sizeof(block_pq2_0) < (int64_t(1) << 31) &&
         (args.ncols_x/QK_PQ2_0 + 1)*args.ncols_y*(int64_t) sizeof(block_q8_1_mmq) < (int64_t(1) << 31) &&
         // Same bound as the GGML_ASSERT in launch_mul_mat_q (ntiles_dst*blocks_per_ne00 < 2^30). It keeps the int
         // stream-k index kbc = b*ntiles*nkb/grid in range; shapes outside it take the existing path, which asserts.
-        ((args.nrows_x + 127)/128)*((args.ncols_max + 127)/128)*(args.ncols_x/QK_PQ2_0) < (int64_t(1) << 30);
+        ((args.nrows_x + 127)/128)*((args.ncols_dst + 127)/128)*(args.ncols_x/QK_PQ2_0) < (int64_t(1) << 30);
 }
 
 // GGML_CUDA_PQ2_J128: 0 = off, any other integer = on (any NVIDIA sm_90+ device). Unset: on for Hopper (cc 9.x), where
@@ -849,7 +849,7 @@ static bool ggml_cuda_pq2_j128_enabled(const int cc) {
 // Same grid rule as launch_mul_mat_q for the PQ2_0 J=128 (stream-k) config on NVIDIA.
 static int ggml_cuda_mmq_pq2_j128_grid(const mmq_args & args, const int nsm) {
     const int nty    = (int) ((args.nrows_x + 127) / 128);
-    const int ntx    = (int) ((args.ncols_max + 127) / 128);
+    const int ntx    = (int) ((args.ncols_dst + 127) / 128);
     const int ntiles = nty*ntx;
     const int nwaves = (ntiles + nsm - 1) / nsm;
     const int eff    = 100*ntiles / (nsm*nwaves);
@@ -857,7 +857,7 @@ static int ggml_cuda_mmq_pq2_j128_grid(const mmq_args & args, const int nsm) {
 }
 
 static bool ggml_cuda_mmq_pq2_j128_needs_fixup(const mmq_args & args, const int grid) {
-    const int ntiles = (int) ((args.nrows_x + 127) / 128) * (int) ((args.ncols_max + 127) / 128);
+    const int ntiles = (int) ((args.nrows_x + 127) / 128) * (int) ((args.ncols_dst + 127) / 128);
     return ntiles % grid != 0;
 }
 
@@ -878,7 +878,7 @@ template <ggml_type type, bool PURE, bool ADD, bool COMPACT = false>
 static void ggml_cuda_mmq_pq2_j128_launch(const mmq_args & args, const int grid, float * tmp_fixup, cudaStream_t stream) {
     constexpr size_t smem = ggml_cuda_pq2_j128_smem() + (PURE ? 0 : 4096); // stream-k: + 2 x 2 KB transposed D4 scales
     const int nkb = (int) (args.ncols_x / QK_PQ2_0);
-    const int ntx = (int) ((args.ncols_max + 127) / 128);
+    const int ntx = (int) ((args.ncols_dst + 127) / 128);
     const auto kernel = (COMPACT || ggml_cuda_pq2_prefill_compact_mode() == 1)
         ? mul_mat_q_pq2_j128<PURE, ADD, false, true> : mul_mat_q_pq2_j128<PURE, ADD>;
     static bool attr_set[GGML_CUDA_MAX_DEVICES] = {};
@@ -912,7 +912,7 @@ static void ggml_cuda_mmq_pq2_j128_launch(const mmq_args & args, const int grid,
 template <ggml_type type>
 static void ggml_cuda_mmq_pq2_j128_run(const mmq_args & args, const int grid, float * tmp_fixup, cudaStream_t stream) {
     static_assert(type == GGML_TYPE_PQ2_0, "PQ2_0 only");
-    const int ntiles = (int) ((args.nrows_x + 127) / 128) * (int) ((args.ncols_max + 127) / 128);
+    const int ntiles = (int) ((args.nrows_x + 127) / 128) * (int) ((args.ncols_dst + 127) / 128);
     if (grid == ntiles) {
         ggml_cuda_mmq_pq2_j128_launch<type, true, false>(args, grid, tmp_fixup, stream);
     } else {

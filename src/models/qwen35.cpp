@@ -531,7 +531,7 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 
     // Extra relocation can overwrite a source row before GDN reads it. Multiple sequences also need read-before-write ordering.
     const bool gdn_state_rows_safe = n_seqs == 1 && mctx_cur->get_n_rs() == 1;
-    const bool gdn_state_rows_path = cparams.n_rs_seq > 0 || (n_seq_tokens == 1 && cparams.fused_gdn_ar);
+    const bool gdn_state_rows_path = cparams.n_rs_seq > 0 || n_seq_tokens == 1;
     const bool gdn_state_rows =
         gdn_state_rows_env && gdn_state_rows_dev_ok && gdn_state_rows_safe && gdn_state_rows_path && !gdn_rpl;
 
@@ -835,16 +835,14 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llm_graph_params & params)
         Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
         cb(Vcur, "mtp_Vcur", il);
 
-        Kcur = ggml_rope_multi(ctx0, Kcur, inp_pos, nullptr,
-                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow);
+        Kcur = build_rope(Kcur, inp_pos, il);
 
         // the store half of build_attn(): same optional cache rotations, same expand order (v, k, then the copies)
-        if (inp_attn->self_k_rot) {
-            Kcur = llama_mul_mat_hadamard(ctx0, Kcur, inp_attn->self_k_rot);
+        if (inp_attn->self_k_rot[il]) {
+            Kcur = llama_mul_mat_hadamard(ctx0, Kcur, inp_attn->self_k_rot[il]);
         }
-        if (inp_attn->self_v_rot) {
-            Vcur = llama_mul_mat_hadamard(ctx0, Vcur, inp_attn->self_v_rot);
+        if (inp_attn->self_v_rot[il]) {
+            Vcur = llama_mul_mat_hadamard(ctx0, Vcur, inp_attn->self_v_rot[il]);
         }
         ggml_build_forward_expand(gf, Vcur);
         ggml_build_forward_expand(gf, Kcur);
@@ -982,9 +980,6 @@ void llama_model_qwen35::graph_mtp::build_chain(const llama_model & model) {
     GGML_ASSERT(ubatch.token && ubatch.embd && "MTP chain needs tokens and hidden rows");
     const int64_t n_lead = n_tokens - n_steps + 1;  // step 0: catch-up rows + the anchor
 
-    int sections[4];
-    std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
-
     // inputs as the single-step graph creates them
     auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd_inp(), hparams.n_embd);
     inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
@@ -1088,7 +1083,9 @@ void llama_model_qwen35::graph_mtp::build_chain(const llama_model & model) {
     ggml_tensor * h_embd   = ggml_view_2d(ctx0, h_all, h_all->ne[0], n_lead, h_all->nb[1], 0);
     ggml_tensor * k_all    = inp_attn->get_k_idxs();
     ggml_tensor * v_all    = (tight & 8) && !kvc->is_v_trans() ? k_all : inp_attn->get_v_idxs();
-    ggml_tensor * mask_all = inp_attn->get_kq_mask();
+    // plain whole-cache mask: llama_context::mtp_chain_support() rules out kv_rows masks
+    GGML_ASSERT(inp_attn->self_attn_mask.rows == nullptr);
+    ggml_tensor * mask_all = inp_attn->self_attn_mask.raw;
 
     // the device holding the head's weights (none: CPU-only, the slices stay views of the host inputs)
     ggml_backend_t dev = nullptr;
@@ -1215,20 +1212,16 @@ void llama_model_qwen35::graph_mtp::build_chain(const llama_model & model) {
         Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, nr);
         cb(Vcur, "mtp_Vcur", il);
 
-        Qcur = ggml_rope_multi(ctx0, Qcur, st_pos, nullptr,
-                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow);
-        Kcur = ggml_rope_multi(ctx0, Kcur, st_pos, nullptr,
-                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow);
+        Qcur = build_rope(Qcur, st_pos, il);
+        Kcur = build_rope(Kcur, st_pos, il);
 
         // build_attn() for this step's rows: same rotations, same expand order, store, then attend
-        if (inp_attn->self_k_rot) {
-            Qcur = llama_mul_mat_hadamard(ctx0, Qcur, inp_attn->self_k_rot);
-            Kcur = llama_mul_mat_hadamard(ctx0, Kcur, inp_attn->self_k_rot);
+        if (inp_attn->self_k_rot[il]) {
+            Qcur = llama_mul_mat_hadamard(ctx0, Qcur, inp_attn->self_k_rot[il]);
+            Kcur = llama_mul_mat_hadamard(ctx0, Kcur, inp_attn->self_k_rot[il]);
         }
-        if (inp_attn->self_v_rot) {
-            Vcur = llama_mul_mat_hadamard(ctx0, Vcur, inp_attn->self_v_rot);
+        if (inp_attn->self_v_rot[il]) {
+            Vcur = llama_mul_mat_hadamard(ctx0, Vcur, inp_attn->self_v_rot[il]);
         }
         ggml_build_forward_expand(gf, Qcur);
         ggml_build_forward_expand(gf, Vcur);
@@ -1238,10 +1231,10 @@ void llama_model_qwen35::graph_mtp::build_chain(const llama_model & model) {
         ggml_build_forward_expand(gf, kvc->cpy_v(ctx0, Vcur, v_idxs, il));
 
         cur = build_attn_mha(Qcur, kvc->get_k_n(ctx0, il, n_kv_s), kvc->get_v_n(ctx0, il, n_kv_s), nullptr, kq_mask,
-                nullptr, nullptr, 0, kq_scale, il);
+                nullptr /* kv_rows */, nullptr, nullptr, 0, kq_scale, il);
         cb(cur, "kqv_out", il);
-        if (inp_attn->self_v_rot) {
-            cur = llama_mul_mat_hadamard(ctx0, cur, inp_attn->self_v_rot);
+        if (inp_attn->self_v_rot[il]) {
+            cur = llama_mul_mat_hadamard(ctx0, cur, inp_attn->self_v_rot[il]);
         }
         cb(cur, "mtp_attn_pregate", il);
 

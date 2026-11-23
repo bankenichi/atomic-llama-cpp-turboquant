@@ -13553,10 +13553,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     for (bool with_bias : { false, true }) {
         for (int64_t m : { 67, 17408 }) {
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, 1, m, 5120, false,
+            test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, 1, m, 5120, false,
                                                                 1, 1, false, with_bias, true, false, { 1, 1 }));
         }
-        test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, 1, 5120, 17408, false,
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, 1, 5120, 17408, false,
                                                             1, 1, false, with_bias, false, false, { 1, 1 }));
     }
 
@@ -13780,6 +13780,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         for (int k : {128, 384, 5120}) {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 7, n, k, {2, 2}, {2, 1}));
         }
+    }
+
     // BF16 matrices of few rows and a long K at small batch sizes (MMVF instead of MMF)
     for (int n : {2, 3, 4, 5, 8}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16, GGML_TYPE_F32,  320, n, 10240, {1, 1}, {1, 1}));
@@ -15177,12 +15179,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int64_t m_batch : {1, 2, 4, 8}) {
         for (bool with_bias : {false, true}) {
             for (bool with_gate : {false, true}) {
-                test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, m_batch, 256, 4096,
+                test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PQ2_0, GGML_GLU_OP_SWIGLU, m_batch, 256, 4096,
                     false, 1, 1, false, with_bias, with_gate, false, {1, 1}));
             }
             // the other GLU ops of the gate epilogue
             for (ggml_glu_op glu_op : {GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI}) {
-                test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PQ2_0, glu_op, m_batch, 256, 4096,
+                test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PQ2_0, glu_op, m_batch, 256, 4096,
                     false, 1, 1, false, with_bias, true, false, {1, 1}));
             }
         }
@@ -15196,7 +15198,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 64, 1, k, {1, 1}, {1, 1}));
     }
     for (int64_t k : {196480, 196608}) {
-        test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 1, 64, k,
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 1, 64, k,
             false, 1, 1, false, false, true, false, {1, 1}));
     }
 
@@ -15206,12 +15208,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 4100, 1, k, {1, 1}, {1, 1}));
         for (bool with_gate : {false, true}) {
             for (bool with_bias : {false, true}) {
-                test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 1, 4100, k,
+                test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 1, 4100, k,
                     false, 1, 1, false, with_bias, with_gate, false, {1, 1}));
             }
         }
     }
-    test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_GEGLU, 1, 4100, 5120,
+    test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_GEGLU, 1, 4100, 5120,
         false, 1, 1, false, false, true, false, {1, 1}));
 
     // ARC-LAB: the MTP draft head's Q6_K weights at their shapes, 1..6 tokens (draft steps, chain step 0): the mat-vecs
@@ -15221,7 +15223,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 5120, n, 10240, {1, 1}, {1, 1}));  // eh_proj
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 5120, n, 6144, {1, 1}, {1, 1}));   // wo
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 5120, n, 17408, {1, 1}, {1, 1}));  // down
-        test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_Q6_K, GGML_GLU_OP_SWIGLU, n, 17408, 5120,
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_Q6_K, GGML_GLU_OP_SWIGLU, n, 17408, 5120,
             false, 1, 1, false, false, true, false, {1, 1}));                                                   // gate+up
     }
     for (bool b : {false, true}) {
@@ -15939,7 +15941,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
 
     // ARC-LAB: Bonsai 2 27B fused FFN gate/up + SwiGLU (PTQ1_0) at decode / MTP-verify batch sizes
     for (int bs : {1, 4}) {
-        test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 17408, bs, 5120,
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_PTQ1_0, GGML_GLU_OP_SWIGLU, 17408, bs, 5120,
                                                             false, 1, 1, false, false, true, false, {1, 1}));
     }
     // Ternary Bonsai 2 27B (qwen35, PTQ1_0) projections at speculative-decoding batch sizes

@@ -1612,8 +1612,7 @@ static std::pair<int, int> test_legacy_private_type_normalization() {
         for (size_t i = 0; ok && i < physical_types.size(); ++i) {
             ok = gguf_get_tensor_type(ctx, i) == physical_types[i];
         }
-        printf("%s: raw 43 stays F8_E4M3, raw 45/46 normalize to TQ3_1S/TQ4_1S: %s
-", __func__, ok ? "OK" : "FAIL");
+        printf("%s: raw 43 stays F8_E4M3, raw 45/46 normalize to TQ3_1S/TQ4_1S: %s\n", __func__, ok ? "OK" : "FAIL");
         gguf_free(ctx);
         npass += ok;
         ntest++;
@@ -1622,8 +1621,7 @@ static std::pair<int, int> test_legacy_private_type_normalization() {
         std::vector<uint8_t> data = make_raw_type_gguf({ 44 }, { GGML_TYPE_TURBO4_0 }, 128);
         gguf_context * ctx = gguf_init_from_buffer(data.data(), data.size(), params);
         const bool ok = ctx == nullptr;
-        printf("%s: unassigned raw 44 is rejected: %s
-", __func__, ok ? "OK" : "FAIL");
+        printf("%s: unassigned raw 44 is rejected: %s\n", __func__, ok ? "OK" : "FAIL");
         gguf_free(ctx);
         npass += ok;
         ntest++;
