@@ -824,7 +824,7 @@ static constexpr size_t ggml_cuda_pq2_j128_smem() {
 
 static bool ggml_cuda_mmq_pq2_j128_supported(const mmq_args & args) {
     return args.type_x == GGML_TYPE_PQ2_0 && args.ids_dst == nullptr && args.tile_spec == nullptr &&
-        args.y_scale == nullptr &&
+        args.y_scale == nullptr && args.fusion.gate == nullptr && args.fusion.x_scale == nullptr &&
         args.nchannels_x == 1 && args.nchannels_y == 1 && args.nsamples_x == 1 && args.nsamples_y == 1 &&
         args.nrows_x % 128 == 0 && args.ncols_x % (2*QK_PQ2_0) == 0 &&
         args.ncols_dst >= 1 &&

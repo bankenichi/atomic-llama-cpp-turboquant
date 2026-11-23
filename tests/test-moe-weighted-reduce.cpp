@@ -9,10 +9,18 @@
 //
 //   W_IN_DST  the weights sit inside dst's range   (CUDA: fusion with staged weights)
 //   X_IN_DST  dst sits inside x's range            (CUDA: fusion must be rejected)
+//   S_IN_DST  the expert scale sits inside dst     (CUDA: fusion must be rejected)
 //   NONE      no overlap                           (control)
 //
+// Every layout also runs in the scaled form MUL(MUL(down_out, expert_scale), router_weights) that
+// per-expert-scaled weights produce; the CUDA backend matches it as a second dispatch branch of the
+// fused reduction, which reads expert_scale as well (S_IN_DST only exists in that form).
+//
 // Every layout is compared bit for bit against the CPU backend running the unfused ops with a
-// plain allocation, since the fused kernel claims to be bit-identical to that chain. On backends
+// plain allocation, since the fused kernel claims to be bit-identical to that chain. The scaled
+// form is fused by upstream's kernel, whose `sum += (e * s) * w` the compiler contracts to FMA, so
+// it is compared with an absolute tolerance of 1e-5 instead (inputs are in [-1, 1); a race on an
+// aliased input shows up as errors of order 0.1-1, an FMA rounding difference as a few ulp). On backends
 // without the fusion the unfused ops run on the aliased layout too; that is still correct because
 // the weights are only read by the MUL and x only by the MUL, both of which complete before the
 // add chain writes dst. GGML_CUDA_MOE_REDUCE_DEBUG=1 shows which cases fused and whether the
@@ -23,6 +31,7 @@
 #include "ggml.h"
 
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -33,6 +42,7 @@ enum layout_kind {
     LAYOUT_NONE,
     LAYOUT_W_IN_DST,
     LAYOUT_X_IN_DST,
+    LAYOUT_S_IN_DST,
 };
 
 static const char * layout_name(layout_kind k) {
@@ -43,6 +53,8 @@ static const char * layout_name(layout_kind k) {
             return "w_in_dst";
         case LAYOUT_X_IN_DST:
             return "x_in_dst";
+        case LAYOUT_S_IN_DST:
+            return "s_in_dst";
     }
     return "?";
 }
@@ -52,6 +64,8 @@ struct reduce_graph {
     ggml_cgraph *              gf      = nullptr;
     ggml_tensor *              x       = nullptr;
     ggml_tensor *              w       = nullptr;
+    ggml_tensor *              s       = nullptr;  // per-expert scale, scaled form only
+    ggml_tensor *              scaled  = nullptr;  // x * s, scaled form only
     ggml_tensor *              experts = nullptr;
     std::vector<ggml_tensor *> views;
     std::vector<ggml_tensor *> adds;  // adds.back() is the output
@@ -59,7 +73,7 @@ struct reduce_graph {
 
 // The views are created before experts has an address, so callers must ggml_backend_view_init
 // them after placing experts.
-static reduce_graph build_reduce_graph(int64_t n_embd, int64_t n_exp, int64_t n_tok) {
+static reduce_graph build_reduce_graph(int64_t n_embd, int64_t n_exp, int64_t n_tok, bool scaled) {
     reduce_graph g;
 
     ggml_init_params params = {
@@ -75,7 +89,16 @@ static reduce_graph build_reduce_graph(int64_t n_embd, int64_t n_exp, int64_t n_
     g.w = ggml_new_tensor_3d(g.ctx, GGML_TYPE_F32, 1, n_exp, n_tok);
     ggml_set_name(g.w, "w");
 
-    g.experts = ggml_mul(g.ctx, g.x, g.w);
+    ggml_tensor * src = g.x;
+    if (scaled) {
+        g.s = ggml_new_tensor_3d(g.ctx, GGML_TYPE_F32, 1, n_exp, n_tok);
+        ggml_set_name(g.s, "s");
+        g.scaled = ggml_mul(g.ctx, g.x, g.s);
+        ggml_set_name(g.scaled, "scaled");
+        src = g.scaled;
+    }
+
+    g.experts = ggml_mul(g.ctx, src, g.w);
     ggml_set_name(g.experts, "experts");
 
     for (int64_t e = 0; e < n_exp; ++e) {
@@ -112,6 +135,9 @@ static void fill_inputs(reduce_graph & g, uint32_t seed) {
     };
     fill(g.x);
     fill(g.w);
+    if (g.s) {
+        fill(g.s);
+    }
 }
 
 static size_t align_up(size_t v, size_t a) {
@@ -147,6 +173,9 @@ static ggml_backend_buffer_t place_tensors(ggml_backend_t backend, reduce_graph 
 
     const size_t x_off = next(g.x);
     place(g.x, x_off);
+    if (g.scaled) {
+        place(g.scaled, next(g.scaled));
+    }
     place(g.experts, next(g.experts));
     for (size_t i = 0; i + 1 < g.adds.size(); ++i) {
         place(g.adds[i], next(g.adds[i]));
@@ -157,6 +186,9 @@ static ggml_backend_buffer_t place_tensors(ggml_backend_t backend, reduce_graph 
             {
                 place(dst, next(dst));
                 place(g.w, next(g.w));
+                if (g.s) {
+                    place(g.s, next(g.s));
+                }
             }
             break;
         case LAYOUT_W_IN_DST:
@@ -167,6 +199,9 @@ static ggml_backend_buffer_t place_tensors(ggml_backend_t backend, reduce_graph 
                 const size_t w_off = dst_off + al;
                 GGML_ASSERT(w_off + ggml_nbytes(g.w) <= dst_off + ggml_nbytes(dst));
                 place(g.w, w_off);
+                if (g.s) {
+                    place(g.s, next(g.s));
+                }
             }
             break;
         case LAYOUT_X_IN_DST:
@@ -175,6 +210,21 @@ static ggml_backend_buffer_t place_tensors(ggml_backend_t backend, reduce_graph 
                 const size_t dst_off = x_off + al;
                 GGML_ASSERT(dst_off + ggml_nbytes(dst) <= x_off + ggml_nbytes(g.x));
                 place(dst, dst_off);
+                place(g.w, next(g.w));
+                if (g.s) {
+                    place(g.s, next(g.s));
+                }
+            }
+            break;
+        case LAYOUT_S_IN_DST:
+            {
+                // s strictly inside [dst, dst + nbytes(dst))
+                GGML_ASSERT(g.s != nullptr);
+                const size_t dst_off = next(dst);
+                place(dst, dst_off);
+                const size_t s_off = dst_off + al;
+                GGML_ASSERT(s_off + ggml_nbytes(g.s) <= dst_off + ggml_nbytes(dst));
+                place(g.s, s_off);
                 place(g.w, next(g.w));
             }
             break;
@@ -192,11 +242,12 @@ static bool run_case(ggml_backend_t backend,
                      int64_t        n_embd,
                      int64_t        n_exp,
                      int64_t        n_tok,
-                     layout_kind    layout) {
-    const uint32_t seed = (uint32_t) (n_embd * 1000003 + n_exp * 10007 + n_tok * 101 + layout);
+                     layout_kind    layout,
+                     bool           scaled) {
+    const uint32_t seed = (uint32_t) (n_embd * 1000003 + n_exp * 10007 + n_tok * 101 + layout + (scaled ? 7 : 0));
 
     // device side: hand-placed layout
-    reduce_graph          g   = build_reduce_graph(n_embd, n_exp, n_tok);
+    reduce_graph          g   = build_reduce_graph(n_embd, n_exp, n_tok, scaled);
     ggml_backend_buffer_t buf = place_tensors(backend, g, layout);
     fill_inputs(g, seed);
     const ggml_status st = ggml_backend_graph_compute(backend, g.gf);
@@ -210,7 +261,7 @@ static bool run_case(ggml_backend_t backend,
     ggml_free(g.ctx);
 
     // reference: CPU backend, unfused ops, plain allocation
-    reduce_graph          r    = build_reduce_graph(n_embd, n_exp, n_tok);
+    reduce_graph          r    = build_reduce_graph(n_embd, n_exp, n_tok, scaled);
     ggml_backend_buffer_t rbuf = ggml_backend_alloc_ctx_tensors(r.ctx, cpu);
     GGML_ASSERT(rbuf);
     fill_inputs(r, seed);
@@ -223,22 +274,28 @@ static bool run_case(ggml_backend_t backend,
     ggml_free(r.ctx);
 
     size_t mismatches = 0;
+    double max_err    = 0.0;
     if (st != GGML_STATUS_SUCCESS) {
         mismatches = got.size();
     } else {
         for (size_t i = 0; i < got.size(); ++i) {
-            if (memcmp(&got[i], &ref[i], sizeof(float)) != 0) {
+            const double err = std::fabs((double) got[i] - (double) ref[i]);
+            max_err          = std::isnan(err) ? INFINITY : std::fmax(max_err, err);
+            const bool bad   = scaled ? !(err <= 1e-5) : memcmp(&got[i], &ref[i], sizeof(float)) != 0;
+            if (bad) {
                 ++mismatches;
             }
         }
     }
 
-    printf("  n_embd=%-3" PRId64 " n_exp=%-2" PRId64 " n_tok=%-2" PRId64 " layout=%-8s  %s", n_embd, n_exp, n_tok,
-           layout_name(layout), mismatches == 0 ? "OK" : "FAIL");
+    printf("  n_embd=%-3" PRId64 " n_exp=%-2" PRId64 " n_tok=%-2" PRId64 " layout=%-8s scaled=%d  %s", n_embd, n_exp,
+           n_tok, layout_name(layout), (int) scaled, mismatches == 0 ? "OK" : "FAIL");
     if (st != GGML_STATUS_SUCCESS) {
         printf("  (graph_compute status %d)", (int) st);
     } else if (mismatches) {
-        printf("  (%zu of %zu elements differ)", mismatches, got.size());
+        printf("  (%zu of %zu elements differ, max abs error %.3g)", mismatches, got.size(), max_err);
+    } else if (scaled) {
+        printf("  (max abs error %.3g)", max_err);
     }
     printf("\n");
 
@@ -275,13 +332,18 @@ int main() {
 
     int failed = 0;
     int total  = 0;
-    for (layout_kind layout : { LAYOUT_NONE, LAYOUT_W_IN_DST, LAYOUT_X_IN_DST }) {
-        for (int64_t n_exp : { 2, 4, 8, 15 }) {
-            for (int64_t n_embd : { 64, 66 }) {
-                for (int64_t n_tok : { 1, 7 }) {
-                    ++total;
-                    if (!run_case(backend, cpu, n_embd, n_exp, n_tok, layout)) {
-                        ++failed;
+    for (bool scaled : { false, true }) {
+        for (layout_kind layout : { LAYOUT_NONE, LAYOUT_W_IN_DST, LAYOUT_X_IN_DST, LAYOUT_S_IN_DST }) {
+            if (layout == LAYOUT_S_IN_DST && !scaled) {
+                continue;
+            }
+            for (int64_t n_exp : { 2, 4, 8, 15 }) {
+                for (int64_t n_embd : { 64, 66 }) {
+                    for (int64_t n_tok : { 1, 7, 4096 }) {
+                        ++total;
+                        if (!run_case(backend, cpu, n_embd, n_exp, n_tok, layout, scaled)) {
+                            ++failed;
+                        }
                     }
                 }
             }

@@ -137,6 +137,12 @@ happens only when no prompt-cache entry shares the checkpoint.
   affected, because `x` is a `MUL_MAT_ID` output and the allocator keeps
   dependencies apart. Fixed in `01a18bea0` with an explicit overlap check that
   falls back to the unfused path; the test stays as the guard (48/48 after the fix).
+  It now also covers the scaled form `(experts * expert_scale) * weights`, which
+  upstream's kernel fuses, with the scale placed inside `dst` (`s_in_dst`) and a
+  4096-token shape. Small shapes never expose the race; at 4096 tokens, dropping
+  `expert_scale` from the overlap check fails 8/8 `s_in_dst` cases (168/168 with
+  the check). Upstream's fused kernel is FMA-contracted, so the scaled form is
+  compared at 1e-5 instead of bit for bit (observed ≤ 7.2e-7).
 
 ### Other
 
