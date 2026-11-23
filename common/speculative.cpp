@@ -4546,8 +4546,8 @@ std::vector<common_speculative_type> common_speculative_types_from_gguf(const st
     // draft-dflash runs every DFlash family draft, the head of the loaded draft picks the driver.
     // Fork: a Markov head (modern or legacy Prism name) still reports draft-dspark, so launchers and
     // logs keep the lineage (AGENTS.md requirement 8); both types reach the same driver.
-    const bool has_markov = gguf_find_tensor(gguf_ctx.get(), "markov_w1.weight") >= 0 ||
-                            gguf_find_tensor(gguf_ctx.get(), "dspark.markov_head_a.weight") >= 0;
+    // the tensor name follows the architecture, as in the loader (src/models/dflash.cpp)
+    const bool has_markov = gguf_find_tensor(gguf_ctx.get(), arch == "dspark" ? "dspark.markov_head_a.weight" : "markov_w1.weight") >= 0;
     const auto type = has_markov
                     ? COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK
                     : COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
