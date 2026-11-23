@@ -478,7 +478,7 @@ static ggml_type gguf_normalize_legacy_private_type(int32_t raw_type) {
     // This fork historically occupied the then-unused GGUF IDs 43-46. They are
     // unambiguous today and must remain readable after moving the private types
     // out of the upstream namespace. ID 42 is deliberately handled separately:
-    // old Turbo2 and Prism Q2_0_G128 have the same 128-value/34-byte physical
+    // old Turbo2 and Prism PQ2_0 have the same 128-value/34-byte physical
     // layout, and Turbo2 was only ever intended for runtime KV caches.
     switch (raw_type) {
         case 43: return GGML_TYPE_TURBO3_0;
@@ -522,7 +522,7 @@ static bool gguf_normalize_legacy_q2_0_type42(gguf_context & ctx, uint64_t data_
         const bool valid_g64 = gguf_tensor_layout_size(
                 info.t, GGML_TYPE_Q2_0, ctx.alignment, size_g64, padded_g64);
         const bool valid_g128 = gguf_tensor_layout_size(
-                info.t, GGML_TYPE_Q2_0_G128, ctx.alignment, size_g128, padded_g128);
+                info.t, GGML_TYPE_PQ2_0, ctx.alignment, size_g128, padded_g128);
 
         if (!valid_g64) {
             GGML_LOG_ERROR("%s: tensor '%s' is not valid group-64 Q2_0\n", __func__, info.t.name);
@@ -577,7 +577,7 @@ static bool gguf_normalize_legacy_q2_0_type42(gguf_context & ctx, uint64_t data_
         if (info.t.type != GGML_TYPE_Q2_0) {
             continue;
         }
-        if (!gguf_set_tensor_layout(info, GGML_TYPE_Q2_0_G128)) {
+        if (!gguf_set_tensor_layout(info, GGML_TYPE_PQ2_0)) {
             GGML_LOG_ERROR(
                     "%s: legacy group-128 tensor '%s' has an incompatible shape\n",
                     __func__, info.t.name);
@@ -967,11 +967,19 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
     // compute the total size of the data section, taking into account the alignment
     {
         ctx->size = 0;
+        size_t size_if_legacy_q2 = 0; // see the legacy Q2_0 layout hint below
+        bool   has_q2_0          = false;
         for (size_t i = 0; i < ctx->info.size(); ++i) {
             const gguf_tensor_info & ti = ctx->info[i];
             if (ti.offset != ctx->size) {
                 GGML_LOG_ERROR("%s: tensor '%s' has offset %" PRIu64 ", expected %zu\n",
                     __func__, ti.t.name, ti.offset, ctx->size);
+                if (has_q2_0 && ti.offset == size_if_legacy_q2) {
+                    GGML_LOG_ERROR("%s: this file matches the legacy Prism Q2_0 layout (group size 128 stored as ggml type id 42), "
+                        "but this build reads Q2_0 as the official group-64 format\n", __func__);
+                    GGML_LOG_ERROR("%s: you are probably using the wrong GGUF: use the PQ2_0 version of this model (ggml type id 142) "
+                        "or download the group-64 Q2_0 file\n", __func__);
+                }
                 GGML_LOG_ERROR("%s: failed to read tensor data\n", __func__);
                 gguf_free(ctx);
                 return nullptr;
@@ -993,6 +1001,19 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
                 return nullptr;
             }
             ctx->size += padded_size;
+
+            // track the size the data section would have if the Q2_0 tensors used the
+            // legacy Prism group-128 layout, which is byte-identical to PQ2_0
+            if (ti.t.type == GGML_TYPE_Q2_0) {
+                has_q2_0 = true;
+                const size_t nrows = ggml_nrows(&ti.t);
+                // only size rows the PQ2_0 codec can handle, keep the hint off assert-only paths
+                const size_t nbytes_legacy = ti.t.ne[0] % ggml_blck_size(GGML_TYPE_PQ2_0) == 0 ?
+                    ggml_row_size(GGML_TYPE_PQ2_0, ti.t.ne[0]) * nrows : padded_size;
+                size_if_legacy_q2 += GGML_PAD(nbytes_legacy, ctx->alignment);
+            } else {
+                size_if_legacy_q2 += padded_size;
+            }
         }
     }
 

@@ -1981,6 +1981,26 @@ static bool ggml_backend_sched_try_prefetch_input(
     return true;
 }
 
+// ARC-LAB: see ggml-backend-impl.h
+static thread_local char g_sync_trace_cause[128];
+static thread_local bool g_sync_trace_has_cause = false;
+
+void ggml_sync_trace_set_cause(const char * cause) {
+    g_sync_trace_has_cause = cause != nullptr;
+    if (cause) {
+        snprintf(g_sync_trace_cause, sizeof(g_sync_trace_cause), "%s", cause);
+    }
+}
+
+const char * ggml_sync_trace_get_cause(void) {
+    return g_sync_trace_has_cause ? g_sync_trace_cause : nullptr;
+}
+
+static bool ggml_sync_trace_on() {
+    static const bool on = getenv("GGML_SYCL_SYNC_TRACE") && atoi(getenv("GGML_SYCL_SYNC_TRACE")) != 0;
+    return on;
+}
+
 static bool ggml_backend_sched_is_host_weight(const struct ggml_tensor * t) {
     return t->buffer != NULL &&
         ggml_backend_buffer_get_usage(t->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
@@ -2047,6 +2067,9 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         // ensure the previous split's async work has completed before we start
         // this split, the allocator may have reused buffer regions across splits
         if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
+            if (ggml_sync_trace_on()) {
+                ggml_sync_trace_set_cause("sched: backend switch");
+            }
             if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
                 ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
             } else {
@@ -2054,11 +2077,47 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        // without events (no pipeline parallelism), the split backend is waited for once per split: the input copies only
+        // add work for this split. The inputs in host memory are uploaded with async copies, all waited for once before the
+        // split is computed, instead of one blocking copy each.
+        const bool split_events = sched->events[split_backend_id][sched->cur_copy] != NULL;
+        const bool upload_async = !split_events && split_backend->iface.set_tensor_async != NULL && !ggml_backend_is_meta(split_backend);
+        bool split_backend_synced = false;
+        int  n_uploads            = 0;
+
+        auto sync_split_backend = [&]() {
+            if (!split_backend_synced) {
+                ggml_backend_synchronize(split_backend);
+                split_backend_synced = true;
+            }
+        };
+
+        // returns false if the copy has to be made with ggml_backend_tensor_copy
+        auto upload_host_input = [&](ggml_tensor * input, ggml_tensor * input_cpy) {
+            if (!upload_async || !ggml_backend_buffer_is_host(input->buffer) || !ggml_is_contiguous(input) || input_cpy->buffer == NULL ||
+                ggml_backend_buffer_get_type(input_cpy->buffer) != ggml_backend_get_default_buffer_type(split_backend)) {
+                return false;
+            }
+            if (ggml_nbytes(input) == 0) {
+                // nothing to upload (e.g. an empty view); some backends cannot wrap a zero-size source (Metal)
+                return true;
+            }
+            GGML_ASSERT(ggml_are_same_layout(input, input_cpy) && "cannot copy tensors with different layouts");
+            sync_split_backend();
+            ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, ggml_nbytes(input));
+            n_uploads++;
+            return true;
+        };
+
         // copy the input tensors to the split backend
         // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             if (!ggml_backend_sched_is_host_weight(split->inputs[input_id])) {
-                ggml_backend_sched_copy_input(sched, split, split->inputs[input_id]);
+                ggml_tensor * input = split->inputs[input_id];
+                ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+                if (!(input->flags & GGML_TENSOR_FLAG_INPUT) || !upload_host_input(input, input_cpy)) {
+                    ggml_backend_sched_copy_input(sched, split, input);
+                }
             }
         }
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
@@ -2069,6 +2128,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 }
                 ggml_backend_sched_copy_input(sched, split, split->inputs[input_id]);
             }
+        }
+
+        if (n_uploads > 0) {
+            // the host data of the uploads can be overwritten once this function returns (inputs from the user) or once
+            // a later split computes (computed inputs): wait for the copies, as the blocking copies did
+            if (ggml_sync_trace_on()) {
+                ggml_sync_trace_set_cause("sched: split input uploads");
+            }
+            ggml_backend_synchronize(split_backend);
+        }
+
+        if (ggml_sync_trace_on()) {
+            ggml_sync_trace_set_cause(nullptr);
         }
 
         if (!sched->callback_eval) {

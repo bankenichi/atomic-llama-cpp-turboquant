@@ -113,6 +113,7 @@ enum llama_example {
     LLAMA_EXAMPLE_EXPORT_GRAPH_OPS,
     LLAMA_EXAMPLE_DOWNLOAD,
     LLAMA_EXAMPLE_TOKENIZE,
+    LLAMA_EXAMPLE_KV_MEAN_CENTER,
 
     LLAMA_EXAMPLE_COUNT,
 };
@@ -326,13 +327,23 @@ struct common_params_model {
     }
 };
 
+// default MTP draft depth when the target runs on CUDA: there the verify cost grows faster with depth than on Metal
+#define COMMON_SPEC_MTP_N_MAX_CUDA 2
+
 // draft-model-based speculative decoding parameters
 struct common_params_speculative_draft {
     int32_t n_max = 3; // maximum number of tokens to draft during speculative decoding
+    bool    n_max_set = false; // set by --spec-draft-n-max; if false, MTP on CUDA uses COMMON_SPEC_MTP_N_MAX_CUDA
     int32_t n_min = 0; // minimum number of draft tokens to use for speculative decoding
 
     float p_split = 0.1f; // speculative decoding split probability
     float p_min   = 0.0f; // minimum speculative decoding probability (greedy)
+
+    // stop drafting once the sequence is this long (0 = never). Deep in the context a step is bound
+    // by reading the KV cache, and the draft passes plus the multi-column verify add to that read
+    // without shortening it: on a 4070 with Bonsai 2 27B the draft is +85% at zero depth, breaks
+    // even near 24k tokens and costs 30% at 64k. Past the cutoff the slot decodes one token per step.
+    int32_t n_depth_max = 0;
 
     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
 
@@ -402,7 +413,7 @@ struct common_params_speculative {
 
     uint32_t need_n_rs_seq() const {
         bool needs_rs_seq = std::any_of(types.begin(), types.end(), [&](auto t) {
-            return t == COMMON_SPECULATIVE_TYPE_DRAFT_MTP || t == COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3 || t == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            return t == COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE || t == COMMON_SPECULATIVE_TYPE_DRAFT_MTP || t == COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3 || t == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
         });
 
         return needs_rs_seq ? draft.n_max : 0u;
@@ -597,6 +608,9 @@ struct common_params {
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 
+    // path to a K-cache mean-centering bias file (GGUF), or empty to disable.
+    // only takes effect when cache_type_k == GGML_TYPE_Q4_0; see docs/kv-mean-center.md
+    std::string kv_mean_center_path = "";
     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU, split among the GPUs like the layers
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
@@ -641,6 +655,7 @@ struct common_params {
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
+    int32_t checkpoint_every_nt = 0;     // also checkpoint inside a long message every N prompt tokens (0 = off)
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
     bool    cache_ram_explicit  = false; // set by --cache-ram, decision models disable the cache otherwise
 
@@ -665,6 +680,12 @@ struct common_params {
     bool force_pure_content_parser = false;
     common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
     int enable_reasoning = -1; // -1 = auto, 0 = disable, 1 = enable
+
+    // server: reasoning_effort words passed to the chat template (empty = any); others become the fallback
+    std::vector<std::string> reasoning_effort_allow;
+    std::string              reasoning_effort_fallback = "medium";
+    // server: with thinking on, raise a client output cap below this (0 = off)
+    int32_t reasoning_max_tokens_floor = 0;
     bool prefill_assistant = true; // if true, any trailing assistant message will be prefilled into the response
     int sleep_idle_seconds = -1;   // if >0, server will sleep after this many seconds of idle time
 

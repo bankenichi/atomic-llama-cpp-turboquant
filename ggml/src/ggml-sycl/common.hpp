@@ -68,6 +68,8 @@ void ggml_sycl_host_free(void* ptr);
 
 extern int g_ggml_sycl_debug;
 extern int g_ggml_sycl_enable_optimize;
+extern int g_ggml_sycl_quant_f16_gemm;
+extern int g_ggml_sycl_quant_s4_gemm;
 extern int g_ggml_sycl_enable_fusion;
 extern int g_ggml_sycl_enable_esimd;
 extern int g_ggml_sycl_mmvq_wide;
@@ -315,6 +317,8 @@ inline dpct::err0 ggml_sycl_set_device(const int device) try {
 //////////////////////
 struct optimize_feature {
     bool reorder=false;
+    bool xmx_pq2=false; // PQ2_0 rewritten into the XMX layout (pq2_xmx.hpp); only that path can read it
+    bool t2=false;  // ARC-LAB: PTQ1_0 repacked to the TernSYCL 2-bit layout (ptq1-t2.cpp)
     bool onednn_optimized_gemm=false;
 };
 
@@ -336,6 +340,7 @@ struct sycl_device_info {
     sycl_hw_info hw_info;
     optimize_feature opt_feature;
     bool    usm_system_support; // support for USM system allocations
+    int     dpas_exec_size;     // XMX DPAS width (8 or 16) for int8, 0 without XMX
 #ifdef GGML_SYCL_GRAPH
     bool    graph_support;        // command graphs can be recorded and replayed
     bool    graph_update_support; // a finalized command graph can be updated
@@ -1177,5 +1182,11 @@ static __dpct_inline__ float ggml_sycl_ue4m3_to_fp32(uint8_t x) {
     }
     return raw * 0.5f;
 }
+
+// ARC-LAB lab knobs: integer tuning switches read through here can be changed while the process runs. With
+// GGML_SYCL_KNOBS_FILE=<path> set, the file (NAME=VALUE lines) is re-read at the start of a graph compute when its
+// mtime changes and its values override the environment; without it, each knob is read from the environment once.
+int  ggml_sycl_knob(const char * name, int def);
+void ggml_sycl_knobs_refresh();
 
 #endif // GGML_SYCL_COMMON_HPP

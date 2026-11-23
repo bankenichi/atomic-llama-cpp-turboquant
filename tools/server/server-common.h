@@ -380,6 +380,9 @@ struct server_chat_params {
     std::string reasoning_budget_message;
     std::string media_path;
     bool force_pure_content = false;
+    std::vector<std::string> reasoning_effort_allow;    // --reasoning-effort-allow (empty = pass everything)
+    std::string              reasoning_effort_fallback; // --reasoning-effort-fallback
+    int                      reasoning_max_tokens_floor = 0; // --reasoning-max-tokens-floor (0 = off)
 };
 
 // used by /completions endpoint
@@ -431,6 +434,7 @@ struct server_slot_stats {
 
     // speculative decoding stats
     // note: the per-position breakdown lives in server_slot, it is not needed in a task result
+    bool     speculative         = false; // speculation is enabled for this slot: report draft_n even if 0
     uint64_t n_draft_tokens      = 0;
     uint64_t n_draft_accepted    = 0;
     uint64_t n_draft_verif_steps = 0;
@@ -577,7 +581,9 @@ struct server_metrics {
 // other utils
 //
 
-std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n_top);
+// the n_top most likely candidates (by logit, descending) with their probabilities over all candidates
+// if tok is a candidate, *p_tok is set to its probability (otherwise left unchanged)
+std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n_top, llama_token tok, float * p_tok);
 
 std::string safe_json_to_str(const json & data);
 

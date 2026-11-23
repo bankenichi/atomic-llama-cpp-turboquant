@@ -1,5 +1,6 @@
 #include "llama-kv-cache.h"
 
+#include "gguf.h"
 #include "llama-impl.h"
 #include "llama-io.h"
 #include "llama-model.h"
@@ -7,11 +8,13 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 static bool llama_kv_type_is_turbo(ggml_type type) {
@@ -486,6 +489,33 @@ llama_kv_cache::llama_kv_cache(
 
             ggml_gen_hadamard(tmp);
         }
+
+        // ARC-LAB: keep them on the cache's device too (one buffer type only, and not host memory)
+        if ((llama_sync_trim() & 2) && ctxs_bufs.size() == 1 && !hparams.no_alloc) {
+            ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(ctxs_bufs[0].second.get());
+            if (!ggml_backend_buft_is_host(buft)) {
+                ggml_init_params params = {
+                    /* .mem_size   = */ attn_rot_hadamard.size()*ggml_tensor_overhead(),
+                    /* .mem_buffer = */ nullptr,
+                    /* .no_alloc   = */ true,
+                };
+                attn_rot_dev_ctx.reset(ggml_init(params));
+                for (const auto & [n, m] : attn_rot_hadamard) {
+                    ggml_tensor * t = ggml_new_tensor_2d(attn_rot_dev_ctx.get(), GGML_TYPE_F32, n, n);
+                    ggml_format_name(t, "attn_rot_dev_%d", (int) n);
+                    attn_rot_dev[n] = t;
+                }
+                attn_rot_dev_buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(attn_rot_dev_ctx.get(), buft));
+                if (attn_rot_dev_buf) {
+                    ggml_backend_buffer_set_usage(attn_rot_dev_buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                    for (const auto & [n, t] : attn_rot_dev) {
+                        ggml_backend_tensor_set(t, attn_rot_hadamard.at(n).data(), 0, ggml_nbytes(t));
+                    }
+                } else {
+                    attn_rot_dev.clear();
+                }
+            }
+        }
     }
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
@@ -528,7 +558,8 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
         uint32_t new_head = cells.size();
 
-        for (uint32_t i = 0; i < cells.size(); ++i) {
+        // cells outside the used range are empty
+        for (uint32_t i = cells.used_min(), i_end = cells.used_max_p1(); i < i_end; ++i) {
             if (!cells.pos_in(i, p0, p1)) {
                 continue;
             }
@@ -552,7 +583,7 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
             uint32_t new_head = cells.size();
 
-            for (uint32_t i = 0; i < cells.size(); ++i) {
+            for (uint32_t i = cells.used_min(), i_end = cells.used_max_p1(); i < i_end; ++i) {
                 if (!cells.pos_in(i, p0, p1)) {
                     continue;
                 }
@@ -1416,6 +1447,32 @@ const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
     return v_cells[seq_to_stream[seq_id]];
 }
 
+uint32_t llama_kv_cache::get_n_kv_prefix(const slot_info & sinfo, uint32_t n_rows) const {
+    GGML_ASSERT(sinfo.n_stream() == 1);
+
+    const auto & cells = v_cells[sinfo.strm[0]];
+    const auto & idxs  = sinfo.idxs[0];
+
+    // highest used cell, not counting the cells of rows >= n_rows (they were empty before this ubatch)
+    uint32_t p1 = cells.used_max_p1();
+    while (p1 > 0) {
+        const uint32_t c = p1 - 1;
+        bool later = false;
+        for (size_t k = n_rows; k < idxs.size() && !later; ++k) {
+            later = idxs[k] == c;
+        }
+        if (!later && !cells.is_empty(c)) {
+            break;
+        }
+        --p1;
+    }
+
+    // same padding as get_n_kv
+    const uint32_t n_pad_cur = std::max(n_pad, 256u);
+
+    return std::min(cells.size(), std::max(n_pad_cur, GGML_PAD(p1, n_pad_cur)));
+}
+
 uint32_t llama_kv_cache::get_stream(llama_seq_id seq_id) const {
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
 
@@ -1507,6 +1564,18 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     const int32_t ikv = map_layer_ids.at(il);
 
     ggml_tensor * k = layers[ikv].k;
+
+    // optional per-(head,channel) mean-centering: subtract a fixed bias from the K vector
+    // before it is written into the cache. this is exactly softmax-invariant (the same
+    // constant is added to every logit of a query's row, which softmax does not see), so
+    // nothing else in attention needs to change. see load_kv_mean_center().
+    if (!k_bar.empty() && k_bar[ikv] != nullptr) {
+        ggml_tensor * bias = k_bar[ikv];
+        if (bias->type != k_cur->type) {
+            bias = ggml_cast(ctx, bias, k_cur->type);
+        }
+        k_cur = ggml_sub(ctx, k_cur, bias);
+    }
 
     int64_t n_embd_head       = k_cur->ne[0];
     const int64_t n_head      = k_cur->ne[1];
@@ -1614,6 +1683,188 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
     return ggml_set_rows(ctx, v_view, v_cur, v_idxs);
 }
 
+bool llama_kv_cache::load_kv_mean_center(const char * path, bool require_q4_0) {
+    GGML_ASSERT(path != nullptr);
+    GGML_ASSERT(k_bar.empty() && "K-cache mean-centering already loaded");
+
+    ggml_context * ctx_data = nullptr;
+
+    struct gguf_init_params gguf_params = {
+        /*.no_alloc =*/ false,
+        /*.ctx      =*/ &ctx_data,
+    };
+
+    struct gguf_context * ctx_gguf = gguf_init_from_file(path, gguf_params);
+    if (!ctx_gguf) {
+        LLAMA_LOG_ERROR("%s: failed to load K-cache mean-centering bias file from %s\n", __func__, path);
+        return false;
+    }
+
+    // validate the cache type first, so an unsupported cache type gets its actionable error
+    // even when the bias file's basis would also mismatch
+    if (require_q4_0) {
+        for (const auto & layer : layers) {
+            if (layer.k->type != GGML_TYPE_Q4_0) {
+                LLAMA_LOG_ERROR("%s: K-cache mean-centering requires K cache type %s, but layer %d has type %s\n",
+                        __func__, ggml_type_name(GGML_TYPE_Q4_0), layer.il, ggml_type_name(layer.k->type));
+                gguf_free(ctx_gguf);
+                ggml_free(ctx_data);
+                return false;
+            }
+        }
+    }
+
+    // the bias is only valid in the basis it was measured in: a bias calibrated with the
+    // Hadamard K-cache rotation active must be applied with the rotation active, and vice
+    // versa. a mismatched basis measurably degrades quantization quality instead of
+    // improving it (see tools/kv-mean-center/README.md), so refuse it outright.
+    {
+        const int64_t idx_k_rot = gguf_find_key(ctx_gguf, "kv_mean_center.k_rot");
+        if (idx_k_rot >= 0) {
+            if (gguf_get_kv_type(ctx_gguf, idx_k_rot) != GGUF_TYPE_BOOL) {
+                LLAMA_LOG_ERROR("%s: bias file %s has a non-boolean kv_mean_center.k_rot key - malformed file\n",
+                        __func__, path);
+                gguf_free(ctx_gguf);
+                ggml_free(ctx_data);
+                return false;
+            }
+            const bool bias_k_rot = gguf_get_val_bool(ctx_gguf, idx_k_rot);
+            if (bias_k_rot != (n_rot_k > 0)) {
+                LLAMA_LOG_ERROR("%s: bias file %s was calibrated with the K-cache rotation %s, but it is %s "
+                        "for this context - recalibrate with matching cache settings "
+                        "(or set LLAMA_ATTN_ROT_DISABLE=1 consistently in both)\n",
+                        __func__, path,
+                        bias_k_rot  ? "active" : "inactive",
+                        n_rot_k > 0 ? "active" : "inactive");
+                gguf_free(ctx_gguf);
+                ggml_free(ctx_data);
+                return false;
+            }
+        } else {
+            LLAMA_LOG_WARN("%s: bias file %s does not record its calibration basis (kv_mean_center.k_rot); "
+                    "K-cache rotation is %s for this context - a basis mismatch degrades quality\n",
+                    __func__, path, n_rot_k > 0 ? "active" : "inactive");
+        }
+    }
+
+    k_bar.resize(layers.size(), nullptr);
+
+    // one ggml context (+ backend buffer) per unique buffer type, so each bias tensor ends up
+    // on the same device as the K cache tensor it is subtracted against (see cpy_k())
+    std::map<ggml_backend_buffer_type_t, ggml_context *> ctx_map;
+
+    auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
+        auto it = ctx_map.find(buft);
+        if (it != ctx_map.end()) {
+            return it->second;
+        }
+
+        ggml_init_params params = {
+            /*.mem_size   =*/ layers.size()*ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+
+        ggml_context * res = ggml_init(params);
+        if (res) {
+            ctx_map.emplace(buft, res);
+            k_bar_ctxs.emplace_back(res);
+        }
+
+        return res;
+    };
+
+    bool ok = true;
+    size_t n_centered = 0;
+
+    for (size_t ikv = 0; ikv < layers.size() && ok; ++ikv) {
+        const int32_t il = layers[ikv].il;
+
+        const std::string name = "kv_bar.blk." + std::to_string(il) + ".k";
+
+        ggml_tensor * src = ggml_get_tensor(ctx_data, name.c_str());
+        if (!src) {
+            // no bias provided for this layer - leave it uncentered
+            continue;
+        }
+
+        if (src->type != GGML_TYPE_F32) {
+            LLAMA_LOG_ERROR("%s: bias tensor %s must be F32 (got %s)\n",
+                    __func__, name.c_str(), ggml_type_name(src->type));
+            ok = false;
+            break;
+        }
+
+        const int64_t n_embd_head = hparams.n_embd_head_k(il);
+        const int64_t n_head_kv   = hparams.n_head_kv(il);
+
+        if (ggml_nelements(src) != n_embd_head*n_head_kv) {
+            LLAMA_LOG_ERROR("%s: bias tensor %s has %" PRId64 " elements, expected %" PRId64 " (n_embd_head_k * n_head_kv)\n",
+                    __func__, name.c_str(), ggml_nelements(src), n_embd_head*n_head_kv);
+            ok = false;
+            break;
+        }
+
+        ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(model.dev_layer(il));
+
+        ggml_context * ctx = ctx_for_buft(buft);
+        if (!ctx) {
+            LLAMA_LOG_ERROR("%s: failed to allocate context for K-cache mean-centering bias (layer %d)\n", __func__, il);
+            ok = false;
+            break;
+        }
+
+        ggml_tensor * bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd_head, n_head_kv);
+        ggml_format_name(bias, "kv_bar_l%d", il);
+
+        k_bar[ikv] = bias;
+        n_centered++;
+    }
+
+    if (ok) {
+        for (auto & [buft, ctx] : ctx_map) {
+            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+            if (!buf) {
+                LLAMA_LOG_ERROR("%s: failed to allocate buffer for K-cache mean-centering bias\n", __func__);
+                ok = false;
+                break;
+            }
+            k_bar_bufs.emplace_back(buf);
+        }
+    }
+
+    if (ok) {
+        for (size_t ikv = 0; ikv < layers.size(); ++ikv) {
+            if (!k_bar[ikv]) {
+                continue;
+            }
+
+            const int32_t il = layers[ikv].il;
+            const std::string name = "kv_bar.blk." + std::to_string(il) + ".k";
+
+            ggml_tensor * src = ggml_get_tensor(ctx_data, name.c_str());
+            ggml_backend_tensor_set(k_bar[ikv], src->data, 0, ggml_nbytes(k_bar[ikv]));
+        }
+    }
+
+    gguf_free(ctx_gguf);
+    ggml_free(ctx_data);
+
+    if (!ok) {
+        // roll back so cpy_k() never observes a half-initialized k_bar
+        k_bar.clear();
+        k_bar_bufs.clear();
+        k_bar_ctxs.clear();
+
+        return false;
+    }
+
+    LLAMA_LOG_INFO("%s: loaded K-cache mean-centering bias for %zu / %zu layer(s) from %s\n",
+            __func__, n_centered, layers.size(), path);
+
+    return true;
+}
+
 ggml_tensor * llama_kv_cache::build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const {
     const uint32_t n_tokens = ubatch.n_tokens;
 
@@ -1646,6 +1897,7 @@ ggml_tensor * llama_kv_cache::build_input_k_rot(ggml_context * ctx) const {
     ggml_tensor * res = nullptr;
 
     if (n_rot_k) {
+        if (const auto it = attn_rot_dev.find(n_rot_k); it != attn_rot_dev.end()) { return it->second; }
         res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_rot_k, n_rot_k);
         ggml_set_input(res);
         ggml_set_name(res, "attn_inp_k_rot");
@@ -1658,6 +1910,7 @@ ggml_tensor * llama_kv_cache::build_input_v_rot(ggml_context * ctx) const {
     ggml_tensor * res = nullptr;
 
     if (n_rot_v) {
+        if (const auto it = attn_rot_dev.find(n_rot_v); it != attn_rot_dev.end()) { return it->second; }
         res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_rot_v, n_rot_v);
         ggml_set_input(res);
         ggml_set_name(res, "attn_inp_v_rot");
@@ -2004,6 +2257,9 @@ void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch 
 }
 
 void llama_kv_cache::set_input_k_rot(ggml_tensor * dst) const {
+    if (!(dst->flags & GGML_TENSOR_FLAG_INPUT)) {
+        return;  // the device copy (attn_rot_dev), already filled
+    }
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
 
     const auto n_rot = dst->ne[0];
@@ -2013,6 +2269,9 @@ void llama_kv_cache::set_input_k_rot(ggml_tensor * dst) const {
 }
 
 void llama_kv_cache::set_input_v_rot(ggml_tensor * dst) const {
+    if (!(dst->flags & GGML_TENSOR_FLAG_INPUT)) {
+        return;  // the device copy (attn_rot_dev), already filled
+    }
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
 
     const auto n_rot = dst->ne[0];
@@ -3072,6 +3331,22 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
+}
+
+uint32_t llama_kv_cache_context::get_n_kv_prefix(uint32_t n_rows) const {
+    return kv->get_n_kv_prefix(sinfos[i_cur], n_rows);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_n(ggml_context * ctx, int32_t il, uint32_t n_kv_view) const {
+    return kv->get_k(ctx, il, n_kv_view, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_n(ggml_context * ctx, int32_t il, uint32_t n_kv_view) const {
+    return kv->get_v(ctx, il, n_kv_view, sinfos[i_cur]);
+}
+
+bool llama_kv_cache_context::is_v_trans() const {
+    return kv->get_v_trans();
 }
 
 ggml_type llama_kv_cache_context::type_k() const {

@@ -233,6 +233,8 @@ struct llama_layer_nextn {
     struct ggml_tensor * enorm                 = nullptr;
     struct ggml_tensor * hnorm                 = nullptr;
     struct ggml_tensor * shared_head_head      = nullptr;
+    struct ggml_tensor * draft_head            = nullptr;  // ARC-LAB: [n_embd, K] rows of the LM head for top-K tokens
+    struct ggml_tensor * draft_head_ids        = nullptr;  // ARC-LAB: I32 [K] vocab id of each row
     struct ggml_tensor * shared_head_head_s    = nullptr;
     struct ggml_tensor * shared_head_head_in_s = nullptr;
     struct ggml_tensor * shared_head_norm      = nullptr;
@@ -799,11 +801,22 @@ struct llama_model {
     struct ggml_tensor * dspark_conf_proj   = nullptr;
     struct ggml_tensor * dspark_conf_proj_b = nullptr;
 
-    // dspark GIDD log-SNR conditioning (present only when hparams.dspark_log_snr_conditioning)
+    // dspark GIDD log-SNR conditioning (only when hparams.dspark_log_snr_conditioning)
+    struct ggml_tensor * dspark_mode_embedding = nullptr;  // selected request mode, added only to draft input
     struct ggml_tensor * dspark_log_snr_fc1_w = nullptr; // [128 -> n_embd]
     struct ggml_tensor * dspark_log_snr_fc1_b = nullptr;
     struct ggml_tensor * dspark_log_snr_fc2_w = nullptr; // [n_embd -> n_embd]
     struct ggml_tensor * dspark_log_snr_fc2_b = nullptr;
+
+    // AngelSpec DFly: per-draft-layer target-context fusion + TreeFlash predecessor correction.
+    // dfly_layer_fusion is the discriminant: present => DFly, absent => plain DFlash/DSpark.
+    struct ggml_tensor * dfly_layer_fusion  = nullptr; // [n_ctx_feat, n_layer] fusion logits
+    struct ggml_tensor * dfly_ctx_norm      = nullptr; // post-fusion context norm (replaces output_norm_enc)
+    struct ggml_tensor * dfly_hc_hidden_norm = nullptr;
+    struct ggml_tensor * dfly_hc_embed_norm  = nullptr;
+    struct ggml_tensor * dfly_hc_gate        = nullptr; // [2*n_embd, n_ff_hc]
+    struct ggml_tensor * dfly_hc_up          = nullptr; // [2*n_embd, n_ff_hc]
+    struct ggml_tensor * dfly_hc_down        = nullptr; // [n_ff_hc, n_embd]
     struct ggml_tensor * dflash_selector_prev   = nullptr;
     struct ggml_tensor * dflash_selector_next   = nullptr;
     struct ggml_tensor * dflash_selector_hidden = nullptr;
@@ -850,8 +863,26 @@ struct llama_model {
     struct ggml_tensor * dense_2_out_layers_b = nullptr;
     struct ggml_tensor * dense_3_out_layers   = nullptr;
 
+    // dspark drafter: target-feature projection + auxiliary heads (output-level,
+    // not per-layer -- the trunk decoder layers reuse the standard llama_layer
+    // attn_*/ffn_* fields above like any dense Qwen3-style stack).
+    struct ggml_tensor * dspark_fc                = nullptr;  // [n_capture*n_embd -> n_embd]
+    struct ggml_tensor * dspark_hidden_norm       = nullptr;  // RMSNorm after fc
+    struct ggml_tensor * dspark_markov_head_a     = nullptr;  // low-rank logit-bias factor A
+    struct ggml_tensor * dspark_markov_head_b     = nullptr;  // low-rank logit-bias factor B
+    struct ggml_tensor * dspark_confidence_head   = nullptr;  // accept-rate predictor
+    struct ggml_tensor * dspark_confidence_head_b = nullptr;
+    struct ggml_tensor * dspark_corr_hnorm        = nullptr;
+    struct ggml_tensor * dspark_corr_enorm        = nullptr;
+    struct ggml_tensor * dspark_corr_gate         = nullptr;
+    struct ggml_tensor * dspark_corr_up           = nullptr;
+    struct ggml_tensor * dspark_corr_down         = nullptr;
+
+    // GIDD log-SNR conditioning (present only when hparams.dspark_log_snr_conditioning).
+
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
+
 
     // list of devices used in this model
     std::vector<llama_device> devices;

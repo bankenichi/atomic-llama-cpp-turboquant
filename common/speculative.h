@@ -166,6 +166,9 @@ bool common_speculative_restore_boundary_state(
         int32_t n_embd,
         llama_pos & pos,
         std::vector<float> & values);
+// True if deferred catch-up rows plus one first-draft anchor per sequence fit in one llama_decode.
+// Used by draft-mtp so a full-prefill stash (n_tokens == n_batch) does not add a 33rd row.
+bool common_speculative_mtp_first_decode_fits(int32_t n_batch, int32_t catchup_rows, int32_t n_anchors);
 // return true if the target and draft models have compatible vocabs
 bool common_speculative_are_compatible(const llama_model * model_tgt, const llama_model * model_dft);
 
@@ -209,6 +212,12 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const common_batch & batch);
 
+// true if any implementation requires the target's multi-layer tap capture
+// (see llama_set_capture_layers / llama_get_embeddings_capture_ith) -- used by
+// dspark, which conditions on several intermediate target layers concatenated
+// per position rather than a single pre/post-norm embedding.
+bool common_speculative_need_embd_capture(common_speculative * spec);
+
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
@@ -221,6 +230,26 @@ void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);
+
+// types of the implementations that were actually initialized, in priority order
+std::vector<enum common_speculative_type> common_speculative_get_types(const common_speculative * spec);
+
+// TEST/DEBUG ONLY: directly stage target-tap context rows for the dspark
+// implementation (if registered), bypassing the normal process()-driven
+// capture path, which requires a real target context with
+// llama_set_capture_layers engaged and logits requested on every row. Used by
+// the Phase 2 synthetic-target harness (tests/test-dspark-loop.cpp) to drive
+// the block-draft loop deterministically without a target model.
+// `feat` is [n_rows * n_embd_cap] row-major, `pos` is [n_rows] absolute
+// positions, both appended to the sequence's pending context buffer exactly
+// as process() would have. Returns false if no dspark implementation is
+// registered.
+bool common_speculative_dspark_stage_ctx_test(common_speculative * spec,
+                                              llama_seq_id         seq_id,
+                                              const float *        feat,
+                                              int64_t              n_rows,
+                                              int64_t              n_embd_cap,
+                                              const int32_t *      pos);
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }

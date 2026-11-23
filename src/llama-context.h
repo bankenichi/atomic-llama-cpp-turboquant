@@ -8,6 +8,7 @@
 #include "llama-impl.h"
 #include "llama-memory.h"
 #include "llama-moe-cache.h"
+#include "llama-model.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -93,6 +94,13 @@ struct llama_context {
 
     float * get_embeddings_layer_inp(uint32_t lid);
 
+    // multi-layer hidden-state tap (EAGLE3 / dspark target-feature reuse).
+    // get_embeddings_capture_ith returns the concatenated [n_capture * n_embd] row
+    // for output position i, captured layers laid out in capture order.
+    float *  get_embeddings_capture();
+    float *  get_embeddings_capture_ith(int32_t i);
+    uint32_t get_n_capture() const;
+
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -119,8 +127,24 @@ struct llama_context {
 
     void set_embeddings (bool value);
     void set_embeddings_nextn(bool value, bool masked);
+
+    // register the ordered set of intermediate layers to capture. pass an empty
+    // list to disable. the concatenation order follows the order of layer_ids.
+    void set_capture_layers(const std::vector<int32_t> & layer_ids);
+
+    // dspark drafter: stage the target-tap context window consumed by the next
+    // decode() call. feat is [n_ctx_rows * n_embd_cap] row-major (row i is
+    // position pos[i]'s raw concatenated multi-layer tap feature, pre dspark.fc).
+    // pass n_ctx_rows <= 0 (or feat == nullptr) to clear the staged context.
+    void set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos);
+
     void set_embeddings_layer_inp(uint32_t lid, bool enable);
     void set_nextn_layer_offset(int32_t offset);
+
+    // ARC-LAB: chained MTP drafts (llama-ext.h llama_mtp_chain_support / llama_set_mtp_chain / llama_get_mtp_chain_ids)
+    int32_t         mtp_chain_support() const;
+    void            set_mtp_chain(uint32_t n_steps);
+    const int32_t * get_mtp_chain_ids();
     void set_causal_attn(bool value);
     void set_warmup(bool value);
 
@@ -307,6 +331,10 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
+    // dspark drafter: staged target-tap context window for the next decode call.
+    // see llama_dspark_ctx in llama-graph.h for why this needs its own side channel
+    // instead of riding batch.token/embd.
+    llama_dspark_ctx dspark_ctx;
     llama_moe_cache_ptr moe_cache;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
@@ -325,6 +353,11 @@ private:
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;
     std::vector<int32_t> embd_batch_idxs; // extracted index -> original batch index
+
+    // concatenated multi-layer hidden states (2-dimensional array:
+    // [n_outputs][n_capture_layers * n_embd]). populated only when
+    // cparams.n_capture_layers > 0 and the model graph filled t_h_capture.
+    buffer_view<float> embd_capture = { nullptr, 0 };
 
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active
@@ -417,6 +450,43 @@ private:
 
     llm_graph_result * gf_res_prev_active = nullptr;
 
+    // the Hadamard transforms this context's graphs consult: the model's own, plus the target's when the model
+    // borrows its token embeddings or output head through ctx_other (those tensors keep the target's folding)
+    llama_hadamard hdmd;
+
+    // ARC-LAB: chained MTP drafts. mtp_chain_embd: device copy of the token_embd rows the draft head can produce (row k
+    // = token mtp_chain_vocab[k]), built on first use unless LLAMA_MTP_CHAIN_GPU_EMBD=0. mtp_chain_out: the last chain
+    // decode's per-step argmax rows, read back asynchronously.
+    ggml_tensor *           mtp_chain_embd = nullptr;
+    ggml_context_ptr        mtp_chain_ctx;
+    ggml_backend_buffer_ptr mtp_chain_buf;
+    bool                    mtp_chain_embd_tried = false;
+    std::vector<int32_t>    mtp_chain_vocab;   // draft-head index -> token id (empty: no draft head, indices are tokens)
+    std::vector<int32_t>    mtp_chain_out;
+    std::vector<int32_t>    mtp_chain_tok;     // mtp_chain_out mapped to token ids
+
+    // ARC-LAB: chain graphs are kept per batch shape, each with its own scheduler, so a draft whose shape (rows, steps)
+    // and per-step KV lengths match an earlier one reuses its built and allocated graph: no build, split or allocation
+    // per draft, and the regular decodes keep their own reusable graph in gf_res_prev
+    struct mtp_chain_entry {
+        ggml_backend_sched_ptr sched;
+        std::array<llm_graph_result_ptr, 2> res;
+        llm_graph_result * active = nullptr;
+    };
+    std::map<uint32_t, mtp_chain_entry> mtp_chain_cache;
+    mtp_chain_entry * mtp_chain_entry_for(uint32_t n_tokens);
+    uint32_t                mtp_chain_n_out = 0;
+
+    // ARC-LAB: LLAMA_MTP_DRAFT_TIMING=1: per chain decode, whether its cached graph was reused (else why not) and the
+    // host time of process_ubatch's parts; printed to stderr every 64 chain decodes
+    struct mtp_chain_reuse_stats {
+        int                        n = 0, reused = 0;
+        double                     build_ms = 0, set_ms = 0, compute_ms = 0;
+        std::map<std::string, int> miss;
+        void report();
+    };
+    mtp_chain_reuse_stats mtp_chain_rs;
+
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
 
@@ -424,6 +494,7 @@ private:
     std::map<llama_seq_id, llama_memory_buffers> mem_storage;
 
     bool has_evaluated_once = false;
+    bool sync_pending       = true;  // ARC-LAB: work queued since the last synchronize (LLAMA_SYNC_TRIM)
 
     // env: LLAMA_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;

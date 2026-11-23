@@ -30,8 +30,16 @@ void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q2_0_ref(x, y, k);
 }
 
-void quantize_row_q2_0_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    quantize_row_q2_0_g128_ref(x, y, k);
+void quantize_row_pq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_pq2_0_ref(x, y, k);
+}
+void quantize_row_pq2_0m(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_pq2_0m_ref(x, y, k);
+}
+
+
+void quantize_row_ptq1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_ptq1_0_ref(x, y, k);
 }
 
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
@@ -226,10 +234,10 @@ void ggml_vec_dot_q2_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
     *s = sumf;
 }
 
-// Q2_0_g128: 128 weights per block = four Q8_0 blocks (4 * 32). No arch defines
+// PQ2_0: 128 weights per block = four Q8_0 blocks (4 * 32). No arch defines
 // a SIMD variant yet, so this scalar path is the symbol referenced by the traits.
-void ggml_vec_dot_q2_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-    const int qk = QK2_0_G128;
+void ggml_vec_dot_pq2_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK_PQ2_0;
     const int nb = n / qk;
 
     assert(n % qk == 0);
@@ -239,7 +247,7 @@ void ggml_vec_dot_q2_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t 
     UNUSED(by);
     UNUSED(bs);
 
-    const block_q2_0_g128 * GGML_RESTRICT x = vx;
+    const block_pq2_0 * GGML_RESTRICT x = vx;
     const block_q8_0      * GGML_RESTRICT y = vy;
 
     float sumf = 0.0f;
@@ -265,6 +273,74 @@ void ggml_vec_dot_q2_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t 
                 sumi_block += ((int)((byte >> 6) & 3) - 1) * qy[b*4 + 3];
             }
 
+            sumi += d1 * sumi_block;
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
+}
+
+// PTQ1_0 x Q8_0. The trits are stored base-3 interleaved rather than in element
+// order, so decode a block into element order first using the same traversal as
+// dequantize_row_ptq1_0 -- that keeps the two provably in step. Four Q8_0 blocks
+// cover one 128-wide PTQ1_0 block.
+void ggml_vec_dot_ptq1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK_PTQ1_0;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_ptq1_0 * GGML_RESTRICT x = vx;
+    const block_q8_0   * GGML_RESTRICT y = vy;
+
+    static const uint8_t pow3[6] = {1, 3, 9, 27, 81, 243};
+    static const size_t  stages[3] = {32, 16, 8};
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        int8_t q[QK_PTQ1_0];
+        int o = 0;
+
+        size_t j = 0;
+        for (size_t st = 0; st < 3; ++st) {
+            const size_t c = stages[st];
+            for (; j + c <= sizeof(x->qs); j += c) {
+                for (size_t nn = 0; nn < 5; ++nn) {
+                    for (size_t m = 0; m < c; ++m) {
+                        const uint8_t v  = x[i].qs[j + m] * pow3[nn];
+                        const int16_t xi = ((uint16_t) v * 3) >> 8;
+                        q[o++] = (int8_t) (xi - 1);
+                    }
+                }
+            }
+        }
+        for (size_t nn = 0; nn < 4; ++nn) {
+            for (size_t h = 0; h < sizeof(x->qh); ++h) {
+                const uint8_t v  = x[i].qh[h] * pow3[nn];
+                const int16_t xi = ((uint16_t) v * 3) >> 8;
+                q[o++] = (int8_t) (xi - 1);
+            }
+        }
+        assert(o == QK_PTQ1_0);
+
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+
+        for (int k = 0; k < 4; k++) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            int sumi_block = 0;
+            for (int b = 0; b < 32; ++b) {
+                sumi_block += (int) q[k*32 + b] * (int) yb->qs[b];
+            }
             sumi += d1 * sumi_block;
         }
 
@@ -1388,4 +1464,80 @@ void quantize_row_iq4_nl(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, 
 void quantize_row_iq4_xs(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_K == 0);
     quantize_iq4_xs(x, y, 1, k, NULL);
+}
+
+// PQ2_0 x Q8_K reference dot (tier 2, 2026-09-18): one activation scale per 256 elements instead of per 32, so a
+// 128-weight block's integer dot can be accumulated in one int32 and scaled once. Scalar reference for the x86
+// kernel's tolerance test; also the non-x86 fallback. Two PQ2_0 blocks map onto one Q8_K block (halves).
+void ggml_vec_dot_pq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_K == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_pq2_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+    const int nb = n / QK_PQ2_0;
+
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; i++) {
+        const block_q8_K * GGML_RESTRICT yb = &y[i >> 1];
+        const int8_t * GGML_RESTRICT q8 = yb->qs + 128 * (i & 1);
+        int sumi = 0;
+        for (int k = 0; k < 4; k++) {
+            for (int b = 0; b < 8; b++) {
+                const uint8_t byte = x[i].qs[8 * k + b];
+                for (int j = 0; j < 4; j++) {
+                    sumi += (((byte >> (2 * j)) & 3) - 1) * q8[32 * k + 4 * b + j];
+                }
+            }
+        }
+        sumf += (GGML_CPU_FP16_TO_FP32(x[i].d) * yb->d) * (float) sumi;
+    }
+    *s = sumf;
+}
+
+// PQ2_0M x Q8_K reference dot: one activation scale per 256 elements.
+// Two PQ2_0M blocks map onto one Q8_K block (halves).
+// Dequant uses min/max (range-scale): y = m + q * d, where m = min, d = (max - min) / 3.
+void ggml_vec_dot_pq2_0m_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_PQ2_0 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_pq2_0m * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+    const int nb = n / QK_PQ2_0;
+
+    static_assert(QK_PQ2_0 == 4 * QK8_0, "expected four Q8_0 blocks per PQ2_0M block");
+
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; ++i) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        const float m0 = GGML_CPU_FP16_TO_FP32(x[i].m);
+
+        for (int k = 0; k < QK_PQ2_0 / QK8_0; ++k) {
+            const block_q8_0 * yb = &y[i * (QK_PQ2_0 / QK8_0) + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            const uint8_t * qs = x[i].qs + k * (QK8_0 / 4);
+            int sum_q8 = 0;
+            int sum_dot = 0;
+
+            for (int b = 0; b < QK8_0 / 4; ++b) {
+                const uint8_t byte = qs[b];
+                for (int j = 0; j < 4; ++j) {
+                    const int q8 = yb->qs[4 * b + j];
+                    sum_q8 += q8;
+                    sum_dot += ((byte >> (2 * j)) & 3) * q8;
+                }
+            }
+            sumf += d1 * (m0 * sum_q8 + d0 * sum_dot);
+        }
+    }
+    *s = sumf;
 }

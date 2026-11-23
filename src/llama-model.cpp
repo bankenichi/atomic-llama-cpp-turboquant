@@ -27,8 +27,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cfloat>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <functional>
@@ -39,6 +41,15 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// Personal fork: selects which runtime serves general.architecture = "dspark".
+// The default is this fork's DFlash-based DSpark path; LLAMA_DSPARK_RUNTIME=prism
+// opts into Prism's dedicated runtime. common/speculative.cpp reads the same
+// variable so the model class and the speculative implementation always agree.
+static bool llama_dspark_prism_runtime_requested() {
+    const char * runtime = getenv("LLAMA_DSPARK_RUNTIME");
+    return runtime != nullptr && strcmp(runtime, "prism") == 0;
+}
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
@@ -351,7 +362,6 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
         case LLM_ARCH_EAGLE3:
             return new llama_model_eagle3(params);
         case LLM_ARCH_DFLASH:
-        case LLM_ARCH_DSPARK:
             return new llama_model_dflash(params);
         case LLM_ARCH_MIMO2:
             return new llama_model_mimo2(params);
@@ -363,6 +373,19 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_glm5_next(params);
         case LLM_ARCH_STEP35:
             return new llama_model_step35(params);
+        case LLM_ARCH_DSPARK:
+            // Personal fork: published Prism DSpark sidecars (general.architecture
+            // = "dspark") run through the DFlash/DSpark runtime by default. That
+            // path carries this fork's 4096-position private draft window with
+            // rollover and target image-feature pooling (AGENTS.md requirements
+            // 2 and 8), validated on the owner's exact Bonsai sidecar. Prism's
+            // dedicated DSpark runtime (src/models/dspark.cpp) has neither, so it
+            // is opt-in: LLAMA_DSPARK_RUNTIME=prism selects it for both the model
+            // and the speculative implementation.
+            if (llama_dspark_prism_runtime_requested()) {
+                return new llama_model_dspark(params);
+            }
+            return new llama_model_dflash(params);
         case LLM_ARCH_SPARK2_5:
             return new llama_model_spark2_5(params);
         case LLM_ARCH_K2_HORIZON:
@@ -673,6 +696,9 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                     GGML_ASSERT(tensor->ne[axis] == 2*key_dim + value_dim);
                     return {{key_dim, 2 + head_ratio}};
                 }
+                if (ud->model->hdmd.gdn_v_grouped && std::regex_match(tensor_name, pattern_ssm_out_weight)) {
+                    return {{value_dim, 1}};
+                }
                 if (std::regex_match(tensor_name, pattern_attn_gate_weight) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
                     return {{key_dim, head_ratio}};
                 }
@@ -732,6 +758,9 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             const int64_t head_dim        = hparams.ssm_d_state;
             const int64_t blck_size_perf  = std::lcm(blck_size, 128);
             const int64_t granularity_qkv = std::lcm(blck_size_perf, head_dim);
+            if (ud->model->hdmd.gdn_v_grouped && std::regex_match(tensor_name, pattern_ssm_out_weight)) {
+                return std::vector<int64_t>(segments.size(), granularity_qkv * (hparams.ssm_dt_rank / hparams.ssm_n_group));
+            }
             if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_attn_gate_weight) ||
                     std::regex_match(tensor_name, pattern_ssm_conv1d) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv);
@@ -873,7 +902,11 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     tensor_config tc = get_tensor_config();
     split_state.axis = tc.axis;
     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
-        const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
+        int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
+        if (const auto it = ud->model->hdmd.weight_blocks.find(tc.tensor_axis_0->name);
+                it != ud->model->hdmd.weight_blocks.end()) {
+            blck_size = std::lcm(blck_size, int64_t(it->second));
+        }
         const float * tensor_split = ud->model->tensor_split();
         std::vector<float> tensor_split_scan;
         tensor_split_scan.reserve(ud->n_devices);
@@ -1593,6 +1626,9 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 }
 
 bool llama_model_base::load_tensors(llama_model_loader & ml) {
+    if (params.dspark_head_source && arch != LLM_ARCH_DSPARK) {
+        throw std::runtime_error("Shared target head is supported only for DSpark");
+    }
     const auto & split_mode   = params.split_mode;
     const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
     const auto & tensor_split = params.tensor_split;
@@ -1901,6 +1937,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    if (arch == LLM_ARCH_DSPARK && params.dspark_head_source) {
+        tensors_by_name.emplace_back("output.weight", output);
+    }
     // per-tensor activation precision policy
     prec_policy.load(ml, *this);
 
@@ -2011,6 +2050,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         ctx_bufs.emplace_back(ctx, std::move(buf_ptrs));
     }
+
 
     if (llama_supports_gpu_offload()) {
         const int n_gpu = std::min(n_gpu_layers, n_layer_all);
@@ -2151,6 +2191,8 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
             case LLM_ARCH_QWEN35:
             case LLM_ARCH_QWEN35MOE:
             case LLM_ARCH_QWEN3NEXT:
+            case LLM_ARCH_DSPARK:
+            case LLM_ARCH_GEMMA4:
                 break;
             default:
                 throw std::runtime_error(format(
@@ -2166,7 +2208,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
                 "ffn_gate", "ffn_up", "ffn_down",
                 "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps", "ffn_gate_up_exps",
                 "ffn_gate_shexp", "ffn_up_shexp", "ffn_down_shexp",
-                "ssm_out",
+                "ssm_out", "nextn.draft_head",
             };
             if (name == "output.weight") {
                 return true; // the output head is built through build_lora_mm in every arch
@@ -2192,7 +2234,8 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
         };
 
         for (const auto & weight_name : weight_names) {
-            if (!is_foldable_weight(weight_name)) {
+            // a DSpark drafter only borrows the target's folded output head
+            if (!is_foldable_weight(weight_name) || (arch == LLM_ARCH_DSPARK && weight_name != "output.weight")) {
                 throw std::runtime_error(format(
                     "prism.hadamard: weight '%s' is not on a verified Hadamard-aware matmul path", weight_name.c_str()));
             }
@@ -2206,7 +2249,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
         ml.get_arr(LLM_KV_PRISM_HADAMARD_INVERSE_WEIGHT_NAMES, inverse_names, false);
         for (const auto & name : inverse_names) {
             // the graph applies the inverse only after the token-embedding lookup, other latent tables stay rotated
-            if (name != "token_embd.weight") {
+            if (name != "token_embd.weight" || arch == LLM_ARCH_DSPARK) {
                 throw std::runtime_error(format(
                     "prism.hadamard: weight '%s' is not a verified inverse-after-lookup table", name.c_str()));
             }
@@ -3373,6 +3416,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 
 llama_model_params llama_model_default_params() {
     llama_model_params result = {
+        /*.dspark_head_source          =*/ nullptr,
         /*.devices                     =*/ nullptr,
         /*.tensor_buft_overrides       =*/ nullptr,
         /*.n_gpu_layers                =*/ -1,
@@ -3666,9 +3710,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
             // DSV4 DSpark drafters use DeepSeek-V4's normal RoPE; legacy DFlash backbones are NeoX
             return model->hparams.dsv4_hc_mult > 0 ? LLAMA_ROPE_TYPE_NORM : LLAMA_ROPE_TYPE_NEOX;
 
-        case LLM_ARCH_DSPARK:
-            return LLAMA_ROPE_TYPE_NEOX;
-
         case LLM_ARCH_SENSENOVA_U1:
         case LLM_ARCH_QWEN2VL:
         case LLM_ARCH_PADDLEOCR:
@@ -3681,6 +3722,10 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN4EXP:
         case LLM_ARCH_QWEN3TTS:
             return LLAMA_ROPE_TYPE_IMROPE;
+        // dspark's own trunk is a plain dense Qwen3-style stack (standard
+        // rotate-half/NEOX RoPE), independent of the target's RoPE family --
+        case LLM_ARCH_DSPARK:
+            return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_GLM4:
             return model->hparams.use_mrope() ? LLAMA_ROPE_TYPE_MROPE : LLAMA_ROPE_TYPE_NORM;
@@ -3799,8 +3844,10 @@ bool llama_model_has_encoder(const llama_model * model) {
         case LLM_ARCH_T5:
         case LLM_ARCH_T5ENCODER:
         case LLM_ARCH_EAGLE3:
-        case LLM_ARCH_DFLASH:
-        case LLM_ARCH_DSPARK:    return true;
+        case LLM_ARCH_DFLASH:    return true;
+        // the DFlash-based DSpark runtime encodes target features; Prism's
+        // opt-in dedicated runtime stages them out of band instead
+        case LLM_ARCH_DSPARK:    return dynamic_cast<const llama_model_dspark *>(model) == nullptr;
         default:                 return false;
     }
 }
@@ -3845,6 +3892,91 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int 
         return nullptr;
     }
     return model->devices[i].dev;
+}
+
+bool llama_model_dspark_get_meta(const llama_model * model, llama_dspark_meta * out) {
+    if (model == nullptr || out == nullptr) {
+        return false;
+    }
+
+    const auto & hp = model->hparams;
+    if (hp.dspark_block_size == 0) {
+        return false;  // not a dspark model
+    }
+
+    // dspark ships no tokenizer (converter calls _set_vocab_none(): it ties to
+    // the TARGET model's vocab), so the real vocab width only exists as
+    // token_embd.weight's own shape -- mirrors src/models/dspark.cpp's
+    // load_arch_tensors and tests/test-dspark-forward.cpp's n_vocab_from_model.
+    const ggml_tensor * tok_embd = model->get_tensor("token_embd.weight");
+    if (tok_embd == nullptr) {
+        return false;
+    }
+
+    out->n_embd          = hp.n_embd;
+    out->n_vocab         = tok_embd->ne[1];
+    out->n_capture       = hp.n_dspark_target_layers;
+    out->n_embd_cap      = out->n_capture * out->n_embd;
+    out->block_size      = (int32_t) hp.dspark_block_size;
+    out->mask_token_id   = (int32_t) hp.dspark_mask_token_id;
+    out->markov_rank     = hp.dspark_markov_rank;
+    out->graph_corrected = hp.dspark_hidden_correction;
+
+    return true;
+}
+
+bool llama_model_dspark_get_markov(const llama_model * model, std::vector<float> & w1, std::vector<float> & w2) {
+    if (model == nullptr || model->hparams.dspark_markov_rank == 0) {
+        return false;
+    }
+
+    const ggml_tensor * a = model->dspark_markov_head_a;
+    const ggml_tensor * b = model->dspark_markov_head_b;
+    if (a == nullptr || b == nullptr) {
+        return false;
+    }
+
+    GGML_ASSERT(a->ne[0] == b->ne[0] && a->ne[1] == b->ne[1] && "dspark: markov_head_a/b shape mismatch");
+
+    auto copy_to_f32 = [](const ggml_tensor * t, std::vector<float> & out) -> bool {
+        const int64_t n = ggml_nelements(t);
+        out.resize((size_t) n);
+
+        switch (t->type) {
+            case GGML_TYPE_F32:
+                ggml_backend_tensor_get(t, out.data(), 0, (size_t) n * sizeof(float));
+                return true;
+            case GGML_TYPE_F16:
+                {
+                    std::vector<ggml_fp16_t> tmp((size_t) n);
+                    ggml_backend_tensor_get(t, tmp.data(), 0, (size_t) n * sizeof(ggml_fp16_t));
+                    ggml_fp16_to_fp32_row(tmp.data(), out.data(), n);
+                    return true;
+                }
+            case GGML_TYPE_BF16:
+                {
+                    std::vector<ggml_bf16_t> tmp((size_t) n);
+                    ggml_backend_tensor_get(t, tmp.data(), 0, (size_t) n * sizeof(ggml_bf16_t));
+                    ggml_bf16_to_fp32_row(tmp.data(), out.data(), n);
+                    return true;
+                }
+            default:
+                {
+                    const auto * traits = ggml_get_type_traits(t->type);
+                    if (!ggml_is_quantized(t->type) || traits == nullptr || traits->to_float == nullptr) {
+                        LLAMA_LOG_ERROR("%s: unsupported markov head tensor type %s\n", __func__,
+                                        ggml_type_name(t->type));
+                        return false;
+                    }
+                    std::vector<uint8_t> raw(ggml_nbytes(t));
+                    ggml_backend_tensor_get(t, raw.data(), 0, raw.size());
+                    traits->to_float(raw.data(), out.data(), n);
+                    return true;
+                }
+        }
+    };
+
+    return copy_to_f32(a, w1) && copy_to_f32(b, w2);
 }
 
 void llama_model_set_attn_rot(struct llama_model * model, bool value) {
@@ -3960,6 +4092,10 @@ const int32_t * llama_model_target_layer_ids(const struct llama_model * model) {
 
 uint32_t llama_model_target_layer_ids_n(const struct llama_model * model) {
     return (uint32_t) model->target_layer_ids.size();
+}
+
+bool llama_model_has_dspark_markov_head(const struct llama_model * model) {
+    return model->dspark_markov_w1 != nullptr;
 }
 
 // read rows [row0, row0 + n_rows) of a 2D tensor as F32

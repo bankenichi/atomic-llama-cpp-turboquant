@@ -2,4 +2,6 @@
 
 #include "../mmq.cuh"
 
-DECL_MMQ_CASE(GGML_TYPE_Q2_0_G128);
+#if !defined(GGML_USE_HIP)
+DECL_MMQ_CASE(GGML_TYPE_PTQ1_0);
+#endif

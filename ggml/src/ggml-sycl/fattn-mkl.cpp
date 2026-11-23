@@ -134,35 +134,29 @@ static void mkl_fa_online_softmax_chunk(
     float logit_softcap, int64_t wg_size,
     const sycl::event & dep_event) {
 
-    // One work-group per query row: exactly q_rows groups of wg_size
-    // items. q_rows * wg_size is already a multiple of wg_size, so unlike
-    // the one-item-per-row kernels there is no round-up / tail guard.
-    const int64_t wg         = q_rows * wg_size;
-    const int     local_size = (int) wg_size;  // stride in the loops below
+    // ARC-LAB: one work-group per query row (was one work-item per row walking the whole chunk: neighbouring
+    // work-items read addresses chunk_size floats apart, 72% of generation time at 115K context). Same math.
+    GGML_UNUSED(wg_size);
+    constexpr int SWG = 256;
     stream->submit([&](sycl::handler & cgh) {
         cgh.depends_on(dep_event);
-        cgh.parallel_for(sycl::nd_range<1>(wg, wg_size),
+        cgh.parallel_for(sycl::nd_range<1>((size_t) q_rows * SWG, SWG),
             [=](sycl::nd_item<1> item) {
-                const int local_id = (int)item.get_local_id(0);
-                const int row = (int)item.get_group(0); // tile-relative
-                const int jc_abs    = q0 + row;
+                const int jc_rel = item.get_group(0);
+                const int tid    = item.get_local_id(0);
+                const int jc_abs = q0 + jc_rel;
+                auto      grp    = item.get_group();
+
                 const int gqa_group = jc_abs / n_queries;
                 const int q_row     = jc_abs % n_queries;
-                // Score buffers are tile-local (relative index).
-                const float * __restrict KQ_row = KQ_f32
-                    + row * (int64_t)chunk_size;
-                sycl::half * __restrict S_row = S_f16
-                    + row * (int64_t)chunk_size;
-                // Persistent accumulator is full-sized (absolute index).
-                float * __restrict vkq = VKQ_accum
-                    + jc_abs * (int64_t)DV;
+
+                const float * __restrict KQ_row = KQ_f32 + jc_rel * (int64_t)chunk_size;
+                float * __restrict vkq = VKQ_accum + jc_abs * (int64_t)DV;
+
                 const sycl::half * mask_h = nullptr;
-                int64_t m_stride = 0;
                 if (mask_data) {
-                    int m_head = (mask_n_heads > 1)
-                        ? (kvh_head + gqa_group) : 0;
-                    mask_h   = mask_data + (int64_t)m_head * mask_head_stride;
-                    m_stride = mask_row_stride;
+                    const int m_head = (mask_n_heads > 1) ? (kvh_head + gqa_group) : 0;
+                    mask_h = mask_data + (int64_t)m_head * mask_head_stride + (int64_t)q_row * mask_row_stride + chunk_start;
                 }
                 // Score at chunk offset i — original per-element math.
                 auto score = [&](int i) {
@@ -171,39 +165,34 @@ static void mkl_fa_online_softmax_chunk(
                         s = logit_softcap * sycl::tanh(s);
                     }
                     if (mask_h) {
-                        s += (float)mask_h[q_row * m_stride
-                            + (chunk_start + i)];
+                        s += (float)mask_h[i];
                     }
                     return s;
                 };
-                // Pass 1: strided (coalesced) row-wise local maximum.
+
+                const float old_max = KQ_max[jc_abs];  // read by every item before item 0 updates it below
                 float local_max = -1e30f;
-                for (int i = local_id; i < chunk_size; i += local_size) {
-                    float s = score(i);
-                    if (s > local_max) local_max = s;
+                for (int i = tid; i < chunk_size; i += SWG) {
+                    local_max = sycl::fmax(local_max, score(i));
                 }
-                const float final_local_max = sycl::reduce_over_group(
-                    item.get_group(), local_max, sycl::maximum<float>());
-                // Rescale previous accumulator by exp(old_max - new_max)
-                float old_max = KQ_max[jc_abs];
-                float new_max = (old_max > final_local_max) ? old_max : final_local_max;
-                float rescale = (old_max < -1e29f) ? 1.0f
-                    : sycl::native::exp(old_max - new_max);
-                for (int v = local_id; v < DV; v += local_size) {
+                local_max = sycl::reduce_over_group(grp, local_max, sycl::maximum<float>());
+
+                const float new_max = (old_max > local_max) ? old_max : local_max;
+                const float rescale = (old_max < -1e29f) ? 1.0f : sycl::native::exp(old_max - new_max);
+                for (int v = tid; v < DV; v += SWG) {
                     vkq[v] *= rescale;
                 }
-                // Pass 2: softmax numerators, strided; S row written once.
+
+                sycl::half * __restrict S_row = S_f16 + jc_rel * (int64_t)chunk_size;
                 float local_sum = 0.0f;
-                for (int i = local_id; i < chunk_size; i += local_size) {
-                    float s = score(i);
-                    float val = sycl::native::exp(s - new_max);
+                for (int i = tid; i < chunk_size; i += SWG) {
+                    const float val = sycl::native::exp(score(i) - new_max);
                     S_row[i] = sycl::half(val);
                     local_sum += val;
                 }
-                const float total_sum = sycl::reduce_over_group(
-                    item.get_group(), local_sum, sycl::plus<float>());
-                if (local_id == 0) {
-                    KQ_sum[jc_abs] = KQ_sum[jc_abs] * rescale + total_sum;
+                local_sum = sycl::reduce_over_group(grp, local_sum, sycl::plus<float>());
+                if (tid == 0) {
+                    KQ_sum[jc_abs] = KQ_sum[jc_abs] * rescale + local_sum;
                     KQ_max[jc_abs] = new_max;
                 }
             });
