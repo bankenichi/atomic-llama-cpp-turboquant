@@ -304,6 +304,11 @@ llama_build_and_test(test-speculative-rejection-sampling.cpp ARGS
     -m "${SPEC_TARGET_DIR}/llama-dense.gguf")
 set_tests_properties(test-speculative-rejection-sampling PROPERTIES FIXTURES_REQUIRED speculative-model)
 
+# DSpark draft context and window cap (AGENTS.md requirement 8), CPU, tiny sidecar written by the test
+llama_build_and_test(test-dspark-draft-cap.cpp LABEL behavior ARGS
+    "${SPEC_TARGET_DIR}/llama-dense.gguf")
+set_tests_properties(test-dspark-draft-cap PROPERTIES FIXTURES_REQUIRED speculative-model)
+
 # Test context state handling across all architectures, using the generated dummy models
 llama_test(
     test-llama-context

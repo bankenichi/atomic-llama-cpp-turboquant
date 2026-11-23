@@ -2053,6 +2053,25 @@ static std::pair<int32_t, int32_t> common_speculative_media_pool_bin(int32_t p, 
 }
 
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
+// Fork (AGENTS.md requirement 8): DSpark sidecars are trained for 4096 positions, so the draft context and the
+// driver's private window hold at most this many positions per sequence.
+static constexpr llama_pos COMMON_DSPARK_N_CTX_PER_SEQ = 4096;
+
+// Whether a loaded draft model is a DSpark sidecar. Decided from the model, not from --spec-type: a sidecar
+// launched as draft-dflash runs the DSpark lineage too (the driver switches on the Markov head). Covers the
+// modern DFlash-format DSpark, the legacy Prism `dspark` architecture, and Prism's own runtime
+// (LLAMA_DSPARK_RUNTIME=prism), which does not load through llama_model_dflash.
+static bool common_speculative_model_is_dspark(const llama_model * model) {
+    if (model == nullptr) {
+        return false;
+    }
+    if (llama_model_has_dspark_markov_head(model) || llama_model_dflash_variant(model) == LLAMA_DFLASH_VARIANT_DSPARK) {
+        return true;
+    }
+    char arch[32] = {};
+    return llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch)) > 0 && std::strcmp(arch, "dspark") == 0;
+}
+
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     common_params_speculative_draft params;
 
@@ -2287,6 +2306,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         this->n_max = this->params.n_max;
 
         window_capacity = (llama_pos) llama_n_ctx_seq(ctx_dft);
+        if (common_speculative_model_is_dspark(model_dft)) {
+            // with a unified KV cache llama_n_ctx_seq() is the whole cache (4096 x n_parallel); the window of each
+            // sequence must still roll over at the trained 4096 positions
+            window_capacity = std::min(window_capacity, COMMON_DSPARK_N_CTX_PER_SEQ);
+        }
         window_reserve = this->params.n_max + (is_dspark && sample_from_anchor ? 0 : 1);
         if (window_reserve <= 0 || window_reserve >= window_capacity) {
             throw std::runtime_error(string_format(
@@ -4807,15 +4831,6 @@ common_speculative_init_result::common_speculative_init_result(
     // the draft context holds as many tokens per sequence as the target context
     cparams.n_ctx = llama_n_ctx(ctx_tgt);
 
-    // Fork (AGENTS.md requirement 8): DSpark sidecars are trained for 4096 positions. Keep the per-slot cap
-    // that common_base_params_to_speculative computed; the DFlash driver maps the larger target domain into
-    // this private window and rolls it over.
-    if (std::find(params.speculative.types.begin(), params.speculative.types.end(),
-                COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != params.speculative.types.end()) {
-        const uint32_t cap = 4096u * (uint32_t) std::max(1, params.n_parallel);
-        cparams.n_ctx = std::min<uint32_t>(cparams.n_ctx, cap);
-    }
-
     // n_rs_seq stays as common_context_params_to_llama set it: the draft context needs the same rollback window as
     // the target, with n_rs_seq == 0 its seq_rm fails silently on partial acceptance and keeps stale positions
     cparams.ctx_other = ctx_tgt;
@@ -4836,6 +4851,14 @@ common_speculative_init_result::common_speculative_init_result(
         }
 
         pimpl->model.reset(model_dft);
+
+        // Fork (AGENTS.md requirement 8): a DSpark sidecar is trained for 4096 positions, so its context holds at
+        // most 4096 per parallel slot, whatever spec type launched it; the DFlash driver maps the larger target
+        // domain into this private window and rolls it over
+        if (common_speculative_model_is_dspark(model_dft)) {
+            const uint32_t cap = (uint32_t) COMMON_DSPARK_N_CTX_PER_SEQ * (uint32_t) std::max(1, params.n_parallel);
+            cparams.n_ctx = std::min<uint32_t>(cparams.n_ctx, cap);
+        }
 
         const char * greedy_env = std::getenv("LLAMA_DSPARK_GREEDY_IDS");
         if (greedy_env && std::strcmp(greedy_env, "1") == 0) {
@@ -4877,6 +4900,18 @@ llama_model * common_speculative_init_result::model() {
 
 llama_context * common_speculative_init_result::context() {
     return pimpl->context.get();
+}
+
+llama_pos common_speculative_draft_window_capacity(const common_speculative * spec) {
+    if (spec == nullptr) {
+        return 0;
+    }
+    for (const auto & impl : spec->impls) {
+        if (const auto * dflash = dynamic_cast<const common_speculative_impl_draft_dflash *>(impl.get())) {
+            return dflash->window_capacity;
+        }
+    }
+    return 0;
 }
 
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt) {

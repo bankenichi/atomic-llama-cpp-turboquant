@@ -132,6 +132,10 @@ bool common_speculative_draft_window_plan_make(
         llama_pos rollover_chunk,
         common_speculative_draft_window_plan & plan);
 
+// Test hook: the private draft-window capacity (positions per sequence) of the DFlash/DSpark
+// implementation in spec, or 0 if spec has none.
+llama_pos common_speculative_draft_window_capacity(const common_speculative * spec);
+
 std::vector<uint8_t> common_speculative_draft_window_state_serialize(
         const common_speculative_draft_window_state & state);
 
