@@ -4702,6 +4702,25 @@ static bool ggml_cuda_tensors_overlap(const ggml_tensor * a, const ggml_tensor *
     return (b_start <= a_start && a_start < b_end) || (a_start <= b_start && b_start < a_end);
 }
 
+// Upstream's fused weighted reduction relies on alloc dependencies (see the
+// graph optimize pass) to keep dst off its inputs, and its execution-time
+// check ggml_cuda_check_fusion_memory_ranges skips leaf sources. Buffers that
+// were placed without those dependencies (hand-placed tests, external
+// allocators) can therefore reach the kernel with dst inside the experts or
+// weights, a cross-block race. Reject any such overlap explicitly; the
+// unfused nodes are correct on aliased layouts.
+static bool ggml_cuda_moe_weighted_reduction_inputs_disjoint(const ggml_tensor * dst,
+                                                            const ggml_tensor * experts,
+                                                            const ggml_tensor * expert_scale,
+                                                            const ggml_tensor * weights) {
+    for (const ggml_tensor * src : { experts, expert_scale, weights }) {
+        if (src != nullptr && src->buffer != nullptr && ggml_cuda_tensors_overlap(dst, src)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // MoE weighted-expert reduce, as emitted by llm_graph_context::build_moe_ffn:
 //     MUL(down_out, router_weights)  ->  n_exp x VIEW  ->  (n_exp - 1) x ADD
 // The MUL writes a second full-size [n_embd, n_expert_used, n_tokens] F32 tensor that only
@@ -5488,7 +5507,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         if (ggml_cuda_match_moe_scale_gather(cgraph, i, match, table, ids)) {
             const int count      = match.node_count + 2;
             const int output_idx = i + count - 1;
-            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, count, &output_idx, 1)) {
+            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, count, &output_idx, 1) &&
+                    ggml_cuda_moe_weighted_reduction_inputs_disjoint(match.dst, match.experts, nullptr, match.weights)) {
                 // GGML_CUDA_MOE_EP_VERIFY=1: run the fused kernel into scratch, run the unfused nodes, compare bit-for-bit at the output
                 if (ggml_cuda_moe_ep_verify_mode() != 0) {
                     static float * scratch = nullptr; static int tag = 0;
@@ -5513,7 +5533,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         ggml_cuda_moe_weighted_reduction_match match;
         if (ggml_cuda_match_moe_weighted_reduction(cgraph, i, match)) {
             const int output_idx = i + match.node_count - 1;
-            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, match.node_count, &output_idx, 1)) {
+            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, match.node_count, &output_idx, 1) &&
+                    ggml_cuda_moe_weighted_reduction_inputs_disjoint(match.dst, match.experts, match.expert_scale, match.weights)) {
                 ggml_cuda_op_moe_weighted_reduction(
                     *cuda_ctx, match.experts, match.expert_scale, match.weights, match.dst);
                 if (!ggml_cuda_tail_verify_pending().empty()) {
