@@ -82,7 +82,9 @@ upstream's `llama_model_dflash_variant()`; one fork driver serves every head.
 ### MTP / NextN
 
 The fork/Prism MTP driver is kept whole: deferred catch-up, chained drafts,
-real-position image rows (#30257, adopted in stage 1). Upstream's
+real-position image rows (#30257, adopted in stage 1). Chained drafts are declined
+on contexts that use upstream's `kv_rows` attention (see "Capabilities not
+preserved or changed"). Upstream's
 device-resident target hidden rows for MTP (#31927) and DFlash (#31506) are
 **not** adopted for these drivers. They only save copies, and upstream keeps the
 host path we use.
@@ -123,14 +125,26 @@ happens only when no prompt-cache entry shares the checkpoint.
   recurrent/hybrid test models on CUDA; upstream `f4f6f2e7d` passes. Both shortcuts
   are now limited to single-slot contexts, where the reserve takes them too
   (`b09de0b68`), so the CUDA gather fusions they exist for still apply to the
-  owner's `--parallel 1` servers. Upstream's `build_rs` zeroing change (#31913) is
-  also applied to Prism's rows-path cache view (`9bd028f0f`).
+  owner's `--parallel 1` servers. They are off in every multi-slot context,
+  including the default 4-slot server (auto `--parallel`); that cost was not
+  measured. Upstream's `build_rs` zeroing change (#31913) is also applied to
+  Prism's rows-path cache view (`9bd028f0f`). That view is only built on CPU and
+  Metal (`qwen35.cpp` turns the rows path off for other GPU backends), so the fix
+  was validated on CPU (`test-llama-context`); the Metal path it exists for was
+  not exercised on this machine.
 - DSpark (found by the Bonsai acceptance run, `1d2b2c9bb`): since stage 1 the fork
   driver injects raw target features, but the batch input width special-cased only
   `LLM_ARCH_DFLASH`, so the legacy `dspark` sidecar rejected them and the drafter
   disabled itself; and upstream's draft init overrode the per-slot 4096-position
   draft context cap (requirement 8) with the target context. Both fixed; the
-  acceptance run now shows `draft_ctx_per_seq=4096`.
+  `--parallel 1` acceptance run shows `draft_ctx_per_seq=4096`. That held only for
+  one slot without a unified KV cache: the cap was `4096 x n_parallel` on the whole
+  draft context, which with a unified cache (the default 4-slot server) is also each
+  sequence's window, so rollover happened at 16384 (pre-existing on the backup
+  branch); and the cap keyed on `--spec-type draft-dspark`, so a DSpark sidecar
+  launched as `draft-dflash` was not capped at all. Since `ac778d106` the cap
+  follows the loaded draft model and the driver clamps each sequence's window to
+  4096; `test-dspark-draft-cap` checks both on CPU.
 - MoE: the Prism fused weighted-reduction kernel failed every `x_in_dst` layout
   of `test-moe-weighted-reduce` on CUDA. This is a Prism bug, not a merge
   artifact: the code path is identical on `prism/prism`. Real graphs are not
@@ -189,7 +203,8 @@ happens only when no prompt-cache entry shares the checkpoint.
 | CPU build + CTest | `build-cpu-converge` complete; CTest 63/66 at `b09de0b68`, the same three environmental/drift failures |
 | Granite-1B F16 perplexity | 7.6363 ± 0.0459 vs reference 7.6360 (+0.004 %), CUDA, `-c 2048 -ngl 99` |
 | Granite HF → GGUF conversion | converted from the `E:\moeq\hf` snapshot with `C:\moeq-env` python; all 242 tensors bit-identical to the reference GGUF (metadata differs only in names derived from the snapshot directory, the newer chat-template revision and two newer tokenizer keys); output deleted afterwards |
-| Acceptance: Bonsai + DSpark + mmproj | Pass at `1d2b2c9bb` (exact owner files from `D:\LLM Models`, Turbo4/Turbo3 target KV, Q8_0 draft KV, 32768 target context, draft window 4096): "What is 19 + 23" -> `42`, 61/92 drafts accepted; 11,421-token prompt across the private 4096-position draft window, 853/1,476; image -> "Apollo 11 moon landing", 564/844; retained-image follow-up -> "1969 ... Eagle", 619/824 (prompt cache reused). No CPU offload, so no pinned host buffers |
+| Review fixes (`docs/development/reviews/2026-11-convergence-fixes--claude-sonnet-5.5.md`) | `test-dspark-draft-cap` (new, CPU): before the fix draft `n_ctx`/window 16384/16384 for `--parallel 1` + `draft-dflash` and for 4 unified slots; after 4096/4096 and 16384/4096. `test-moe-weighted-reduce` (CUDA) 168/168 with the new `expert_scale` layouts. `test-gguf` 111/111 with the explicit unassigned-id error. `test-backend-ops -b CUDA0` MUL_MAT / MUL_MAT_ID `pq2_0` 263/263, 83/83 |
+| Acceptance: Bonsai + DSpark + mmproj | Pass at `1d2b2c9bb` (exact owner files from `D:\LLM Models`, `--parallel 1` without a unified KV cache, Turbo4/Turbo3 target KV, Q8_0 draft KV, 32768 target context, draft window 4096): "What is 19 + 23" -> `42`, 61/92 drafts accepted; 11,421-token prompt across the private 4096-position draft window, 853/1,476; image -> "Apollo 11 moon landing", 564/844; retained-image follow-up -> "1969 ... Eagle", 619/824 (prompt cache reused). No CPU offload, so no pinned host buffers |
 | Acceptance: Gemma 4 26B-A4B + assistant + mmproj | Pass (`--n-cpu-moe 14`, Turbo4/Turbo2 KV, assistant Turbo3 KV): `42`, 2/2 drafts; image -> "astronauts landing on the moon", 7/16; retained-image follow-up -> "1969 ... Eagle", 58/64. **Run unpinned** (`GGML_CUDA_NO_PINNED=1`; correctness only, its speed is not comparable with pinned runs): the first pinned attempt was stopped by the GPU watchdog's shared-memory rule before host-memory declarations existed |
 | Acceptance: Qwen 3.6 35B-A3B NextN + mmproj | Pass (`--n-cpu-moe 28`, pinned host buffers declared with `gpulock --host-mib 11088`, Turbo4/Turbo3 KV, embedded `draft-mtp`): `42`, 2/2 drafts; image -> "first manned moon landing by Apollo 11 ... Armstrong and Aldrin", 22/34; retained-image follow-up -> "1969 ... Eagle", 58/64 |
 
