@@ -1,6 +1,6 @@
 # Upstream + Prism convergence, 2026-11
 
-Status: **merged and building; validation in progress** (see [Validation](#validation)).
+Status: **ready for owner review**: merged, built (CUDA and CPU), tested, and all three exact-model acceptance stacks pass (see [Validation](#validation)).
 Nothing is pushed. `main` and `integration/upstream-prism-convergence` were not
 moved.
 
@@ -115,6 +115,22 @@ happens only when no prompt-cache entry shares the checkpoint.
 - `GGML_CUDA_CC_DGX_SPARK` renamed to upstream's `GGML_CUDA_CC_GB10` (same value).
 - Fork/Prism cache types (`TURBO*`, `PQ2_0M`) accept only F32 `SET_ROWS` sources;
   upstream's new BF16 source path covers its own types.
+- Recurrent graphs: Prism's direct state gather (`d0f258c80`) and the qwen35 GDN
+  state-rows path switched on `n_rs == 1 && n_seqs == 1`, which a multi-slot
+  context only sees at decode time (the worst-case reserve gathers `n_seq_max`
+  states). The decode topology then differed from the reserve, and upstream's new
+  `test-llama-context` (`rf` case, `GGML_SCHED_DEBUG_REALLOC`) aborted for all 26
+  recurrent/hybrid test models on CUDA; upstream `f4f6f2e7d` passes. Both shortcuts
+  are now limited to single-slot contexts, where the reserve takes them too
+  (`b09de0b68`), so the CUDA gather fusions they exist for still apply to the
+  owner's `--parallel 1` servers. Upstream's `build_rs` zeroing change (#31913) is
+  also applied to Prism's rows-path cache view (`9bd028f0f`).
+- DSpark (found by the Bonsai acceptance run, `1d2b2c9bb`): since stage 1 the fork
+  driver injects raw target features, but the batch input width special-cased only
+  `LLM_ARCH_DFLASH`, so the legacy `dspark` sidecar rejected them and the drafter
+  disabled itself; and upstream's draft init overrode the per-slot 4096-position
+  draft context cap (requirement 8) with the target context. Both fixed; the
+  acceptance run now shows `draft_ctx_per_seq=4096`.
 - MoE: the Prism fused weighted-reduction kernel failed every `x_in_dst` layout
   of `test-moe-weighted-reduce` on CUDA. This is a Prism bug, not a merge
   artifact: the code path is identical on `prism/prism`. Real graphs are not
@@ -150,28 +166,34 @@ happens only when no prompt-cache entry shares the checkpoint.
 
 ## Validation
 
-<!-- filled in as results arrive -->
-
 | Check | Result |
 |---|---|
 | Stage 1 CUDA build / CTest / backend-ops | 502/502 built; CTest 47/48 (quant-type-selection, remote drift); `test-backend-ops -b CUDA0` 17192/17192 |
 | Stage 2 | built; CTest 49/50 (same); backend-ops 19227/19227 |
 | Stage 3 | 634/634 built; CTest 54/56 (quant-type-selection drift; moe-weighted-reduce, then fixed: 48/48); backend-ops 21116/21116; Granite PPL 7.6369 |
-| Stage 4 CUDA build | 611/611 targets after the build fixes (`12a2cc8c7`, `9bd028f0f`), `build-converge` |
-| Stage 4 CTest (CUDA) | 62/66; failures: `test-llama-context` (see below), the two `python3` tests and the `test-quant-type-selection` drift |
+| Stage 4 CUDA build | 611/611 targets after the build and test fixes (`12a2cc8c7`, `9bd028f0f`, `b09de0b68`), `build-converge` |
+| Stage 4 CTest (CUDA) | 63/66 at `b09de0b68`: only the two `python3` tests (Windows Store stub; pass with a real interpreter, 25/25 and 1/1) and the `test-quant-type-selection` drift. `test-llama-context` passes for all 150 test models on CUDA |
 | Stage 4 `test-backend-ops -b CUDA0` | 23030/23031; the one failure (`MUL_MAT pq2_0 m=1 n=1 k=1024`, NMSE 0.0020 vs 0.0005 for a single output element) passes 5/5 when run alone, so it is input-order sensitivity, not a kernel change |
-| CPU build + CTest | `build-cpu-converge` complete; CTest 63/66: the two `python3` tests (Windows Store stub; both pass with a real interpreter: 25/25 and 1/1) and the `test-quant-type-selection` drift |
+| CPU build + CTest | `build-cpu-converge` complete; CTest 63/66 at `b09de0b68`, the same three environmental/drift failures |
 | Granite-1B F16 perplexity | 7.6363 ± 0.0459 vs reference 7.6360 (+0.004 %), CUDA, `-c 2048 -ngl 99` |
 | Granite HF → GGUF conversion | converted from the `E:\moeq\hf` snapshot with `C:\moeq-env` python; all 242 tensors bit-identical to the reference GGUF (metadata differs only in names derived from the snapshot directory, the newer chat-template revision and two newer tokenizer keys); output deleted afterwards |
-| Acceptance: Bonsai + DSpark + mmproj | pending |
-| Acceptance: Gemma 4 26B-A4B + assistant + mmproj | pending |
-| Acceptance: Qwen 3.6 35B-A3B NextN + mmproj | pending |
+| Acceptance: Bonsai + DSpark + mmproj | Pass at `1d2b2c9bb` (exact owner files from `D:\LLM Models`, Turbo4/Turbo3 target KV, Q8_0 draft KV, 32768 target context, draft window 4096): "What is 19 + 23" -> `42`, 61/92 drafts accepted; 11,421-token prompt across the private 4096-position draft window, 853/1,476; image -> "Apollo 11 moon landing", 564/844; retained-image follow-up -> "1969 ... Eagle", 619/824 (prompt cache reused). No CPU offload, so no pinned host buffers |
+| Acceptance: Gemma 4 26B-A4B + assistant + mmproj | Pass (`--n-cpu-moe 14`, Turbo4/Turbo2 KV, assistant Turbo3 KV): `42`, 2/2 drafts; image -> "astronauts landing on the moon", 7/16; retained-image follow-up -> "1969 ... Eagle", 58/64. **Run unpinned** (`GGML_CUDA_NO_PINNED=1`; correctness only, its speed is not comparable with pinned runs): the first pinned attempt was stopped by the GPU watchdog's shared-memory rule before host-memory declarations existed |
+| Acceptance: Qwen 3.6 35B-A3B NextN + mmproj | Pass (`--n-cpu-moe 28`, pinned host buffers declared with `gpulock --host-mib 11088`, Turbo4/Turbo3 KV, embedded `draft-mtp`): `42`, 2/2 drafts; image -> "first manned moon landing by Apollo 11 ... Armstrong and Aldrin", 22/34; retained-image follow-up -> "1969 ... Eagle", 58/64 |
 
 `test-quant-type-selection` reads `ggml-org/Qwen3.6-27B-GGUF` from `resolve/main`.
 That repository was re-uploaded with merged `attn_qkv_gate` tensors, so the test
 fails on remote drift, not on a code change.
 
 Upstream moved `test-backend-ops` out of CTest (#28740); it is run directly.
+
+Acceptance driver: each stack ran as a hidden direct child of the GPU-lock
+holder (so the watchdog attributes it), with redirected stdout/stderr, a 15-minute
+readiness deadline and a 40-minute overall deadline, using the same flags as
+`scripts/start-hidden-atomic-server.ps1 -ModelRoot 'D:\LLM Models'`. Turns: a text
+question, (Bonsai only) an 11,421-token prompt, an image question about
+`tools/mtmd/test-1.jpeg`, and a full-history follow-up that keeps the image.
+Draft counts are from the server's `timings`.
 
 ## Build recipe
 
