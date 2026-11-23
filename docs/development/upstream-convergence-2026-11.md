@@ -134,3 +134,12 @@ for a new weight type), `scripts/start-hidden-atomic-server.ps1 -ModelRoot`
 build + CTest, acceptance runs (Bonsai+DSpark+mmproj, Gemma 4 + assistant +
 mmproj, Qwen 3.6 NextN + mmproj) only with < 1.5 GiB VRAM in use, Granite
 perplexity (PPL 7.6360 +/- 0.1 %) and conversion checks.
+
+### Update from the controller (main thread), 2026-11-22 ~21:10
+
+- **Stage 3 done on this branch:** `wip/convergence-m3` could not fast-forward (this branch has c55ebc739 and the notes commits), so it was merged as `36546fd04`. The two conflicts (`ggml-cuda/mmq-load-tiles.cuh` loader signature, `ggml-cuda/mmq.cu` dispatch case) were the same b11889 precision/gate API port on both sides; Prism's `PQ2_0` side taken. No old `Q2_0_G128` references remain except the legacy-normalization comment.
+- **Build:** `build-converge`, 634/634, no errors (`build-m3.log`).
+- **CTest:** 54/56. `test-quant-type-selection` = the known remote-model drift. **NEW REAL FAILURE: `test-moe-weighted-reduce`** (Prism #107, 8eaee8b7f, "fold the MoE router weighting and expert reduction into one kernel"): every `layout=x_in_dst` case fails on CUDA0 vs the CPU reference (13–213 elements differ per case); `none` and `w_in_dst` pass. Log `ctest-m3.log`.
+- **test-backend-ops -b CUDA0:** 21116/21116 (`tbo-m3.log`).
+- **Granite-1B F16 PPL with this build:** 7.6369 vs 7.6360 (old build), within 0.1 % (`granite-ppl-m3.log`) — the MoE path is fine on Granite in practice.
+- **To do before acceptance:** find out whether the `x_in_dst` failure is Prism's own bug (does the test fail on `prism/prism` alone? any Prism issue/fix after d12ca13bb?) or merge-induced, and whether real graphs (Qwen3.6 MoE, Gemma 4 MoE) take the aliased path; if they can, fix it or disable the fused path for aliased inputs, with the test as the guard.
