@@ -1205,7 +1205,9 @@ void llama_batch_free(struct llama_batch batch) {
 
 size_t llama_batch_ext_select_n_embd_inp(llama_context_type ctx_type, llm_arch arch, const llama_hparams & hparams) {
     GGML_UNUSED(ctx_type);
-    if (arch == LLM_ARCH_DFLASH) {
+    // the legacy Prism `dspark` architecture loads through the DFlash model class (fork), whose decoder reads the
+    // raw target features; Prism's opt-in runtime class leaves n_embd_inp_enc unset, which falls back to n_embd_inp
+    if (arch == LLM_ARCH_DFLASH || arch == LLM_ARCH_DSPARK) {
         return hparams.n_embd_inp_enc();
     }
     return hparams.n_embd_inp();

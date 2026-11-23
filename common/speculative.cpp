@@ -4807,6 +4807,15 @@ common_speculative_init_result::common_speculative_init_result(
     // the draft context holds as many tokens per sequence as the target context
     cparams.n_ctx = llama_n_ctx(ctx_tgt);
 
+    // Fork (AGENTS.md requirement 8): DSpark sidecars are trained for 4096 positions. Keep the per-slot cap
+    // that common_base_params_to_speculative computed; the DFlash driver maps the larger target domain into
+    // this private window and rolls it over.
+    if (std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != params.speculative.types.end()) {
+        const uint32_t cap = 4096u * (uint32_t) std::max(1, params.n_parallel);
+        cparams.n_ctx = std::min<uint32_t>(cparams.n_ctx, cap);
+    }
+
     // n_rs_seq stays as common_context_params_to_llama set it: the draft context needs the same rollback window as
     // the target, with n_rs_seq == 0 its seq_rm fails silently on partial acceptance and keeps stale positions
     cparams.ctx_other = ctx_tgt;
