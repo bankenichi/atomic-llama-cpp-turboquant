@@ -5,12 +5,18 @@ param(
     [int] $ContextSize = 32768,
     [int] $Port = 8097,
     [string] $LogDirectory = (Join-Path $PSScriptRoot '..\build-rollover\validation'),
-    [int] $ReadyTimeoutSeconds = 60
+    [int] $ReadyTimeoutSeconds = 60,
+    # Directory that holds the stack's GGUF files. The default keeps the
+    # installed-binaries layout; pass the current model directory explicitly.
+    [string] $ModelRoot = 'C:\Program Files\llamacpp'
 )
 
 $ErrorActionPreference = 'Stop'
 
-$modelRoot = 'C:\Program Files\llamacpp'
+if (-not (Test-Path -LiteralPath $ModelRoot -PathType Container)) {
+    throw "Model root does not exist: $ModelRoot"
+}
+$modelRoot = $ModelRoot
 $common = @(
     '--ctx-size', $ContextSize,
     '--n-gpu-layers', 999,
