@@ -907,6 +907,34 @@ static void test_all(const std::string & title, std::function<void(const TestCas
 
     test({
         SUCCESS,
+        "optional prop declared before a required one also accepts the declared order",
+        R"""({
+            "properties": {
+                "name": {"type": "string"},
+                "nickname": {"type": "string"},
+                "age": {"type": "integer"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "city"],
+            "additionalProperties": false
+        })""",
+        R"""(
+            age-kv ::= "\"age\"" space ":" space integer
+            char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+            city-kv ::= "\"city\"" space ":" space string
+            integer ::= ("-"? integral-part)
+            integral-part ::= [0] | [1-9] [0-9]{0,15}
+            name-kv ::= "\"name\"" space ":" space string
+            nickname-kv ::= "\"nickname\"" space ":" space string
+            nickname-rest ::= ( "," space age-kv )?
+            root ::= "{" space name-kv ( "," space nickname-kv )? ( "," space age-kv )? "," space city-kv space "}" | "{" space name-kv "," space city-kv ( "," space ( nickname-kv nickname-rest | age-kv ) )? space "}"
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            string ::= "\"" char* "\""
+        )"""
+    });
+
+    test({
+        SUCCESS,
         "additional props",
         R"""({
             "type": "object",
@@ -1195,6 +1223,109 @@ static void test_all(const std::string & title, std::function<void(const TestCas
             ref-definitions-foo-a-kv ::= "\"a\"" space ":" space number
             root ::= alternative-0 | alternative-1
             space ::= | " " | "\n"{1,2} [ \t]{0,20}
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "empty anyOf",
+        R"""({
+            "anyOf": []
+        })""",
+        R"""(
+            array ::= "[" space ( value ("," space value)* )? space "]"
+            boolean ::= ("true" | "false")
+            char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+            decimal-part ::= [0-9]{1,16}
+            integral-part ::= [0] | [1-9] [0-9]{0,15}
+            null ::= "null"
+            number ::= ("-"? integral-part) ("." decimal-part)? ([eE] [-+]? integral-part)?
+            object ::= "{" space ( string ":" space value ("," space string ":" space value)* )? space "}"
+            root ::= value
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            string ::= "\"" char* "\""
+            value ::= object | array | string | number | boolean | null
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "empty oneOf",
+        R"""({
+            "oneOf": []
+        })""",
+        R"""(
+            array ::= "[" space ( value ("," space value)* )? space "]"
+            boolean ::= ("true" | "false")
+            char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+            decimal-part ::= [0-9]{1,16}
+            integral-part ::= [0] | [1-9] [0-9]{0,15}
+            null ::= "null"
+            number ::= ("-"? integral-part) ("." decimal-part)? ([eE] [-+]? integral-part)?
+            object ::= "{" space ( string ":" space value ("," space string ":" space value)* )? space "}"
+            root ::= value
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            string ::= "\"" char* "\""
+            value ::= object | array | string | number | boolean | null
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "empty type array",
+        R"""({
+            "type": [],
+            "properties": {
+                "a": {
+                    "type": "string"
+                }
+            }
+        })""",
+        R"""(
+            a-kv ::= "\"a\"" space ":" space string
+            char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+            root ::= "{" space  (a-kv )? space "}"
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            string ::= "\"" char* "\""
+        )"""
+    });
+
+    test({
+        SUCCESS,
+        "empty unions in properties",
+        R"""({
+            "type": "object",
+            "properties": {
+                "x": {
+                    "anyOf": []
+                },
+                "y": {
+                    "type": [],
+                    "enum": [
+                        "a",
+                        "b"
+                    ]
+                }
+            }
+        })""",
+        R"""(
+            array ::= "[" space ( value ("," space value)* )? space "]"
+            boolean ::= ("true" | "false")
+            char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+            decimal-part ::= [0-9]{1,16}
+            integral-part ::= [0] | [1-9] [0-9]{0,15}
+            null ::= "null"
+            number ::= ("-"? integral-part) ("." decimal-part)? ([eE] [-+]? integral-part)?
+            object ::= "{" space ( string ":" space value ("," space string ":" space value)* )? space "}"
+            root ::= "{" space  (x-kv x-rest | y-kv )? space "}"
+            space ::= | " " | "\n"{1,2} [ \t]{0,20}
+            string ::= "\"" char* "\""
+            value ::= object | array | string | number | boolean | null
+            x ::= value
+            x-kv ::= "\"x\"" space ":" space x
+            x-rest ::= ( "," space y-kv )?
+            y ::= ("\"a\"" | "\"b\"")
+            y-kv ::= "\"y\"" space ":" space y
         )"""
     });
 

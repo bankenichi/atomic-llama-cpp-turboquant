@@ -1273,8 +1273,6 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         if (spec_mtp) {
             cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
         }
-        cparams_dft.n_rs_seq = 0;
-
         const common_fit_extra_model extra = {
             /*.path_model   =*/ params_dft.model.path.c_str(),
             /*.mparams      =*/ &mparams_dft,
@@ -1422,6 +1420,27 @@ std::vector<llama_adapter_lora_ptr> & common_init_result::lora() {
     return pimpl->lora;
 }
 
+// true if the main model offloads to a CUDA device
+static bool common_params_offload_cuda(const common_params & params) {
+    if (params.n_gpu_layers == 0) {
+        return false;
+    }
+
+    // no --device list: the model goes to the first GPU
+    std::vector<ggml_backend_dev_t> devs = params.devices;
+    if (devs.empty()) {
+        devs.push_back(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU));
+    }
+
+    for (auto * dev : devs) {
+        if (dev != nullptr && strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), "CUDA") == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // only for warmup and probe decodes, fill zeros as dummy input
 static void common_batch_set_zero_state(common_batch & batch, const llama_model * model, std::vector<float> & zeros) {
     zeros.assign(llama_model_n_embd_out(model), 0.0f);
@@ -1431,6 +1450,13 @@ static void common_batch_set_zero_state(common_batch & batch, const llama_model 
 }
 
 common_init_result_ptr common_init_from_params(common_params & params, bool model_only) {
+    auto & spec = params.speculative;
+    if (!spec.draft.n_max_set && common_params_offload_cuda(params) &&
+        std::find(spec.types.begin(), spec.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != spec.types.end()) {
+        spec.draft.n_max = COMMON_SPEC_MTP_N_MAX_CUDA;
+        COM_INF("using MTP draft depth %d on CUDA (set --spec-draft-n-max to override)\n", spec.draft.n_max);
+    }
+
     common_init_result_ptr res(new common_init_result(params, model_only));
 
     llama_model * model = res->model();
@@ -1729,6 +1755,18 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
+    // recurrent/hybrid memory keeps the last n_rs_seq + 1 tokens of a sequence inside one micro-batch, so the window has to fit or we keep the checkpoint path
+    // llama_context clamps the micro-batch to min(n_batch, n_ubatch), and n_batch to n_ctx, so the check uses the effective size and not the requested one
+    {
+        const uint32_t n_batch_eff  = (uint32_t) (params.n_ctx > 0 ? std::min(params.n_batch, params.n_ctx) : params.n_batch);
+        const uint32_t n_ubatch_eff = params.n_ubatch == 0 ? n_batch_eff : std::min(n_batch_eff, (uint32_t) params.n_ubatch);
+
+        if (cparams.n_rs_seq > 0 && n_ubatch_eff <= cparams.n_rs_seq + 1) {
+            COM_WRN("%s: speculative rollback window (%u + 1) does not fit micro-batch size %u, using KV checkpoints instead (raise -ub and -b to at least %u to enable rollback)\n",
+                    __func__, cparams.n_rs_seq, n_ubatch_eff, cparams.n_rs_seq + 2);
+            cparams.n_rs_seq = 0;
+        }
+    }
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;
@@ -1759,6 +1797,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
 
+    // note: params (and therefore params.kv_mean_center_path) is kept alive by the caller for
+    // at least as long as it takes to call llama_init_from_model() with the returned cparams
+    cparams.path_kv_mean_center = params.kv_mean_center_path.empty() ? nullptr : params.kv_mean_center_path.c_str();
     cparams.moe_cache_size = params.moe_cache_size;
 
     return cparams;

@@ -32,4 +32,6 @@ struct ggml_cuda_gdn_mma_args {
     bool    eligible;
 };
 
+// false: the device never takes the chunked kernel (checked before any temporaries are allocated)
+bool ggml_cuda_gdn_mma_device_supported(int device);
 bool ggml_cuda_gdn_mma_launch(int device, const ggml_cuda_gdn_mma_args & args, cudaStream_t stream);

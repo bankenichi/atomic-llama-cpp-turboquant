@@ -51,6 +51,20 @@ struct ggml_cuda_flash_attn_ext_f16_extra_data {
     uintptr_t end;
 };
 
+// GGML_CUDA_FA_PREFILL_F16=N: prefill-sized batches (more than 8 queries) over a quantized K/V cache of at most N cells
+// convert K/V to f16 in pool memory sized by the actual KV length and run the f16 MMA kernel; decode keeps the in-place
+// quantized read. Nothing is reserved at load (the reserved f16 copy would be n_ctx cells).
+static inline bool ggml_cuda_fattn_prefill_f16(const ggml_tensor * dst) {
+    static const int64_t max_kv = [] {
+        const char * e = getenv("GGML_CUDA_FA_PREFILL_F16");
+        return e ? (int64_t) atoll(e) : (int64_t) 0;
+    }();
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    return max_kv > 0 && Q->ne[1] > 8 && K->ne[1] <= max_kv && K->type == V->type && ggml_is_quantized(K->type);
+}
+
 static inline ggml_cuda_flash_attn_ext_f16_extra_data ggml_cuda_flash_attn_ext_get_f16_extra_data(
         const ggml_tensor * dst, const bool need_f16_K, const bool need_f16_V) {
     GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
@@ -296,6 +310,48 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_1(
         const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
 
         sum += K_dm.x*Q_ds.x*sumi + K_dm.y*Q_ds.y/QI8_1;
+    }
+
+    return sum;
+}
+
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_pq2_0m(
+        const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_pq2_0m * K_pq2_0m = (const block_pq2_0m *) K_c;
+    float sum = 0.0f;
+
+    // PQ2_0M: same 2-bit codec as PQ2_0 (2 bits per element, 4 elements per byte),
+    // dequant y = m + q * d, q in {0, 1, 2, 3}. The block layout is block_pq2_0m
+    // (d, m, qs[QK_PQ2_0/4]) -- the M variant adds an offset m per block.
+    const int n_bytes = D / 4; // D elements / 4 elements per byte
+
+    for (int k_KQ_0 = 0; k_KQ_0 < n_bytes; k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+        const int ib  = k_KQ / (QK_PQ2_0 / 4); // which PQ2_0M block (32 bytes per block)
+        const int iqs = k_KQ % (QK_PQ2_0 / 4); // which byte within the block
+
+        const float d = K_pq2_0m[ib].d;
+        const float m = K_pq2_0m[ib].m;
+        const uint8_t byte = K_pq2_0m[ib].qs[iqs];
+
+        // Extract 4 two-bit codes from the byte (2 bits per element, 4 elements per byte)
+        const int c0 = byte & 0x03;
+        const int c1 = (byte >> 2) & 0x03;
+        const int c2 = (byte >> 4) & 0x03;
+        const int c3 = (byte >> 6) & 0x03;
+
+        // Dequantize each K code (m + c * d) and dot with the corresponding Q q8_1 element.
+        // sum = d_Q * (m * sum(c0..c3) + d * sum(cK * qQ))
+        const int c_byte = (c0 << 0) | (c1 << 8) | (c2 << 16) | (c3 << 24);
+        const int u = Q_q8[k_KQ_0/nthreads];
+        const float d_Q = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads].x;
+
+        const int sum_c_u = ggml_cuda_dp4a(c_byte, u, 0);
+        const int sum_u   = ggml_cuda_dp4a(0x01010101, u, 0);
+
+        sum += d_Q * (m * (float)sum_u + d * (float)sum_c_u);
     }
 
     return sum;
@@ -720,6 +776,39 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
 }
 
 template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_pq2_0m(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_pq2_0m * x = (const block_pq2_0m *) vx;
+
+    const int64_t ib  = i0 / QK_PQ2_0;
+    const int     iqs = i0 % QK_PQ2_0 / 4;
+
+    static_assert(ne == 4, "bad ne");
+    const float d = x[ib].d;
+    const float m = x[ib].m;
+
+    const uint8_t byte = x[ib].qs[iqs];
+    const int c0 = byte & 0x03;
+    const int c1 = (byte >> 2) & 0x03;
+    const int c2 = (byte >> 4) & 0x03;
+    const int c3 = (byte >> 6) & 0x03;
+
+    #ifdef FP16_AVAILABLE
+    if constexpr (std::is_same<T, half>::value) {
+        ((half2 *) dst)[0] = make_half2((__half)(m + c0 * d), (__half)(m + c1 * d));
+        ((half2 *) dst)[1] = make_half2((__half)(m + c2 * d), (__half)(m + c3 * d));
+    } else
+    #endif // FP16_AVAILABLE
+    if constexpr (std::is_same<T, float>::value) {
+        ((float *) dst)[0] = m + c0 * d;
+        ((float *) dst)[1] = m + c1 * d;
+        ((float *) dst)[2] = m + c2 * d;
+        ((float *) dst)[3] = m + c3 * d;
+    } else {
+        static_assert(std::is_same_v<T, void>, "bad type");
+    }
+}
+
+template <typename T, int ne>
 static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
     const block_q8_0 * x = (const block_q8_0 *) vx;
 
@@ -901,6 +990,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q5_1<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_Q8_0) {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_PQ2_0M) {
+        return vec_dot_fattn_vec_KQ_pq2_0m<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TURBO3_0) {
@@ -929,6 +1020,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q5_1<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_Q8_0) {
         return dequantize_V_q8_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_PQ2_0M) {
+        return dequantize_V_pq2_0m<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
     } else if constexpr (type_V == GGML_TYPE_TURBO3_0) {
@@ -1288,8 +1381,12 @@ void launch_fattn(
     const int cc  = ggml_cuda_info().devices[id].cc;
     const int nsm = ggml_cuda_info().devices[id].nsm;
 
+    // GGML_CUDA_FA_PREFILL_F16: the f16 copies come from the pool, not from the space reserved behind dst
+    const bool prefill_f16 = ggml_cuda_fattn_prefill_f16(dst);
     const ggml_cuda_flash_attn_ext_f16_extra_data f16_extra =
-        ggml_cuda_flash_attn_ext_get_f16_extra_data(KQV, need_f16_K, need_f16_V);
+        ggml_cuda_flash_attn_ext_get_f16_extra_data(KQV, need_f16_K && !prefill_f16, need_f16_V && !prefill_f16);
+    ggml_cuda_pool_alloc<half> K_f16_pool(pool);
+    ggml_cuda_pool_alloc<half> V_f16_pool(pool);
 
     ggml_cuda_pool_alloc<int>    KV_max(pool);
     ggml_cuda_pool_alloc<float>  dst_tmp(pool);
@@ -1309,8 +1406,8 @@ void launch_fattn(
         const size_t bs = ggml_blck_size(K->type);
         const size_t ts = ggml_type_size(K->type);
 
-        GGML_ASSERT(f16_extra.K != 0);
-        half * K_f16 = (half *) f16_extra.K;
+        half * K_f16 = prefill_f16 ? K_f16_pool.alloc(ggml_nelements(K)) : (half *) f16_extra.K;
+        GGML_ASSERT(K_f16 != nullptr);
         if (ggml_is_contiguously_allocated(K)) {
             to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(K->type);
             to_fp16(K_data, K_f16, ggml_nelements(K), main_stream);
@@ -1343,8 +1440,8 @@ void launch_fattn(
             const size_t bs = ggml_blck_size(V->type);
             const size_t ts = ggml_type_size(V->type);
 
-            GGML_ASSERT(f16_extra.V != 0);
-            half * V_f16 = (half *) f16_extra.V;
+            half * V_f16 = prefill_f16 ? V_f16_pool.alloc(ggml_nelements(V)) : (half *) f16_extra.V;
+            GGML_ASSERT(V_f16 != nullptr);
             if (ggml_is_contiguously_allocated(V)) {
                 to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(V->type);
                 to_fp16(V_data, V_f16, ggml_nelements(V), main_stream);
@@ -1471,11 +1568,14 @@ void launch_fattn(
 
         // If ntiles_total % blocks_per_wave != 0 then some efficiency is lost due to tail effects.
         // Test whether parallel_blocks can be set to a higher value for better efficiency.
+        // Batch-invariant mode: size the KV split as for a single query tile, so the order in which the
+        // partial softmax results are combined does not depend on how many queries are in the batch.
+        const int ntiles_dst_eff = ggml_cuda_batch_invariant() ? ntiles_dst / ntiles_x : ntiles_dst;
         const int blocks_per_wave = nsm * max_blocks_per_sm;
         int nwaves_best = 0;
         int efficiency_percent_best = 0;
         for (int parallel_blocks_test = parallel_blocks; parallel_blocks_test <= ntiles_KV; ++parallel_blocks_test) {
-            const int nblocks_total = ntiles_dst * parallel_blocks_test;
+            const int nblocks_total = ntiles_dst_eff * parallel_blocks_test;
             const int nwaves = (nblocks_total + blocks_per_wave - 1) / blocks_per_wave;
             const int efficiency_percent = 100 * nblocks_total / (nwaves*blocks_per_wave);
 

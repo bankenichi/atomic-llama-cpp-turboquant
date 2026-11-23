@@ -1,5 +1,10 @@
 #include "argsort.cuh"
 #include "top-k.cuh"
+#ifdef GGML_CUDA_USE_CUB
+#    include "top-k-select.cuh" // NVIDIA-only: 32-bit warp masks; used only on the CUB path below
+#endif
+
+#include <cstdlib>
 
 // Adjusted implementation thresholds from #28547, can be overridden at build time
 #ifndef GGML_CUDA_TOP_K_NCOLS_THRESHOLD_BITONIC
@@ -326,6 +331,20 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         top_k_cub(pool, src0_d + i * ncols, dst_d + i * k, ncols, k, stream);
     }
 #elif defined(GGML_CUDA_USE_CUB)  // CUB_TOP_K_AVAILABLE
+    // Wide rows with a small k (the DFlash2 selector over the vocabulary): a
+    // full segmented radix sort per row costs far more than selecting k
+    // values. The streaming selection returns the same indices in the same
+    // order as the stable descending radix sort; GGML_CUDA_TOPK_SELECT=0
+    // restores the argsort route.
+    static const bool select_disabled = getenv("GGML_CUDA_TOPK_SELECT") != nullptr &&
+                                        atoi(getenv("GGML_CUDA_TOPK_SELECT")) == 0;
+    if (!select_disabled && ncols > 1024 && topk_select_supported(ncols, nrows, k)) {
+        ggml_cuda_pool_alloc<uint64_t> scratch(pool, topk_select_scratch_elems(ncols, nrows, k));
+        topk_select_launch(src0_d, dst_d, scratch.get(), ncols, nrows, k, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
     if (ncols <= GGML_CUDA_TOP_K_NCOLS_THRESHOLD_ARGSORT) {
         top_k_argsort_cuda(pool, src0_d, dst_d, ncols, nrows, k, true, stream);
     } else {

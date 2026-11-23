@@ -711,6 +711,127 @@ static bool ggml_metal_fusion_check_mul_mat_add(
         (add->data == res->data || !ggml_metal_fusion_overlap(add, res));
 }
 
+// FWHT kernels at these widths use at most this much threadgroup memory (float[N] for
+// N up to 8192); every Apple GPU with simdgroup reduction provides 32 KB
+#define GGML_METAL_FUSION_FWHT_MAX_TG_MEM 32768
+
+// MUL (Hadamard sign flip) + RESHAPE + MUL_MAT with the FWHT hint: the sign vector is applied
+// while the transform loads its row, instead of a separate elementwise pass over the activation.
+// nodes are the non-empty MUL and MUL_MAT; the RESHAPE between them is located in the raw graph.
+static bool ggml_metal_fusion_match_fwht_signed(
+        const ggml_tensor * mul,
+        const ggml_tensor * mm,
+        const ggml_cgraph * gf,
+              int           gi_mul,
+              int           gi_mm) {
+    static const ggml_op ops[3] = { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
+
+    if (mul->op != GGML_OP_MUL || mm->op != GGML_OP_MUL_MAT ||
+        ggml_get_op_params_i32(mm, 1) != GGML_HINT_SRC0_IS_HADAMARD) {
+        return false;
+    }
+
+    const ggml_tensor * reshape = mm->src[1];
+    if (reshape == nullptr || reshape->op != GGML_OP_RESHAPE || reshape->src[0] != mul) {
+        return false;
+    }
+
+    int gi_rs = -1;
+    for (int k = gi_mul + 1; k < gi_mm; ++k) {
+        if (gf->nodes[k] == reshape) {
+            gi_rs = k;
+            break;
+        }
+    }
+    if (gi_rs < 0) {
+        return false;
+    }
+
+    const int tri[3] = { gi_mul, gi_rs, gi_mm };
+    if (!ggml_can_fuse_subgraph_ext(gf, tri, 3, ops, &gi_mm, 1)) {
+        return false;
+    }
+
+    // x carries the activation shape, signs is the broadcast [K] vector
+    const ggml_tensor * x     = ggml_are_same_shape(mul, mul->src[0]) ? mul->src[0] : mul->src[1];
+    const ggml_tensor * signs = (x == mul->src[0]) ? mul->src[1] : mul->src[0];
+
+    const int64_t n = mm->src[0]->ne[0];
+
+    return signs->type == GGML_TYPE_F32 &&
+        signs->ne[1] == 1 && signs->ne[2] == 1 && signs->ne[3] == 1 &&
+        (x->type == GGML_TYPE_F32 || x->type == GGML_TYPE_F16) &&
+        mul->type == x->type &&
+        ggml_is_contiguous(x) && ggml_is_contiguous(signs) &&
+        signs->ne[0] == x->ne[0] && signs->ne[0] % n == 0 &&
+        ggml_metal_op_mul_mat_use_fwht(mm, GGML_METAL_FUSION_FWHT_MAX_TG_MEM);
+}
+
+static bool ggml_metal_fusion_check_fwht_signed(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * nodes,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(fusion);
+    GGML_UNUSED(mode);
+
+    return ggml_metal_fusion_match_fwht_signed(nodes[0], nodes[1], gf, node_idxs[idx], node_idxs[idx + 1]);
+}
+
+// GLU (swiglu) + MUL (Hadamard sign flip) + RESHAPE + MUL_MAT with the FWHT hint (the ffn_down
+// input of a rotated model): the GLU is evaluated while the transform loads its row, so neither
+// the GLU output nor the sign-flipped copy is written
+static bool ggml_metal_fusion_check_fwht_swiglu(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * nodes,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(fusion);
+    GGML_UNUSED(mode);
+
+    static const ggml_op ops[4] = { GGML_OP_GLU, GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
+
+    const ggml_tensor * glu = nodes[0];
+    const ggml_tensor * mul = nodes[1];
+    const ggml_tensor * mm  = nodes[2];
+
+    if (glu->op != GGML_OP_GLU || ggml_get_glu_op(glu) != GGML_GLU_OP_SWIGLU || glu->src[1] == nullptr ||
+        ggml_get_op_params_i32(glu, 1) != 0 ||
+        glu->type != GGML_TYPE_F32 || glu->src[0]->type != GGML_TYPE_F32 || glu->src[1]->type != GGML_TYPE_F32 ||
+        !ggml_is_contiguous(glu) || !ggml_is_contiguous(glu->src[0]) || !ggml_is_contiguous(glu->src[1]) ||
+        !ggml_are_same_shape(glu, glu->src[0]) || !ggml_are_same_shape(glu, glu->src[1])) {
+        return false;
+    }
+
+    // the MUL must flip the GLU output itself, and the rest must be the signed pattern
+    if (mul->op != GGML_OP_MUL || (mul->src[0] != glu && mul->src[1] != glu) || !ggml_are_same_shape(mul, glu) ||
+        !ggml_metal_fusion_match_fwht_signed(mul, mm, gf, node_idxs[idx + 1], node_idxs[idx + 2])) {
+        return false;
+    }
+
+    const int gi_glu = node_idxs[idx];
+    const int gi_mul = node_idxs[idx + 1];
+    const int gi_mm  = node_idxs[idx + 2];
+
+    int gi_rs = -1;
+    for (int k = gi_mul + 1; k < gi_mm; ++k) {
+        if (gf->nodes[k] == mm->src[1]) {
+            gi_rs = k;
+            break;
+        }
+    }
+    if (gi_rs < 0) {
+        return false;
+    }
+
+    const int quad[4] = { gi_glu, gi_mul, gi_rs, gi_mm };
+    return ggml_can_fuse_subgraph_ext(gf, quad, 4, ops, &gi_mm, 1);
+}
+
 // ---- patterns ------------------------------------------------------------
 
 static const std::vector<ggml_op> ops_norm_mul         = { GGML_OP_NORM, GGML_OP_MUL };
@@ -762,6 +883,9 @@ static const std::vector<ggml_op> ops_moe_reduce_8 = {
 
 static const std::vector<ggml_op> ops_mul_mat_add = { GGML_OP_MUL_MAT, GGML_OP_ADD };
 
+static const std::vector<ggml_op> ops_fwht_signed = { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
+static const std::vector<ggml_op> ops_fwht_swiglu = { GGML_OP_GLU, GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
+
 static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_NORM_MUL,       ops_norm_mul,               {},     false, ggml_metal_fusion_check_norm },
     { GGML_METAL_FUSION_NORM_MUL_ADD,   ops_norm_mul_add,           {},     false, ggml_metal_fusion_check_norm },
@@ -790,6 +914,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_MOE_REDUCE,     ops_moe_reduce_8,           {},     true,  ggml_metal_fusion_check_moe_reduce },
     { GGML_METAL_FUSION_SSM_CONV_SILU,  ops_ssm_conv_silu,          {},     false, ggml_metal_fusion_check_ssm_conv_silu },
     { GGML_METAL_FUSION_MUL_MAT_ADD,    ops_mul_mat_add,            {},     false, ggml_metal_fusion_check_mul_mat_add },
+    { GGML_METAL_FUSION_FWHT_SIGNED,    ops_fwht_signed,            {},     true,  ggml_metal_fusion_check_fwht_signed },
+    { GGML_METAL_FUSION_FWHT_SWIGLU,    ops_fwht_swiglu,            {},     true,  ggml_metal_fusion_check_fwht_swiglu },
 };
 
 // ---- alloc deps -----------------------------------------------------------

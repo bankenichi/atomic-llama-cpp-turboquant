@@ -430,10 +430,15 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        // Prism group-128 Q2_0. Upstream type 42 remains the distinct group-64
-        // encoding; historical Bonsai files using type 42 with this layout are
-        // normalized by the GGUF loader after physical-layout validation.
-        GGML_TYPE_PQ2_0 = 142,
+        // Prism group-128 Q2_0 (PrismML-Eng/llama.cpp). Upstream type 42 remains
+        // the distinct group-64 encoding; historical Bonsai files using type 42
+        // with this layout are normalized by the GGUF loader after physical-layout
+        // validation. 143 and 145 are Prism's later private types; Prism leaves
+        // 144 unassigned. type_traits is sized to GGML_TYPE_COUNT with the gaps
+        // (43..141, 146..239) unused.
+        GGML_TYPE_PQ2_0  = 142,
+        GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
+        GGML_TYPE_PQ2_0M = 145, // Prism min/max (range-scale) Q2_0, group 128, KV-only
 
         // Personal-fork private types. Keep these out of the upstream/Prism GGUF
         // type range. Legacy on-disk IDs 43-46 are normalized by the GGUF reader.
@@ -502,7 +507,8 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
-        GGML_FTYPE_MOSTLY_PQ2_0 = 142, // except 1d tensors (Prism-private group-128 Q2_0)
+        GGML_FTYPE_MOSTLY_PQ2_0 = 128, // except 1d tensors (Prism-private group-128 Q2_0)
+        GGML_FTYPE_MOSTLY_PTQ1_0 = 129, // except 1d tensors (Prism-private group-128 ternary)
     };
 
     // available tensor operations:
@@ -619,6 +625,8 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+
+        GGML_OP_GATED_DELTA_NET_REPLAY, // ARC-LAB: appended last so the existing op numbers do not move
 
         GGML_OP_COUNT,
     };
@@ -2695,6 +2703,59 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
             int64_t               K);
+
+    // rows-indexed state read: instead of a gathered [S_v, S_v, H_v, n_seqs]
+    // scratch, the op reads each sequence's live state directly from `states`
+    // (2D cache view, D = S_v*S_v*H_v wide rows) at row `rows[seq]` (I32,
+    // n_seqs entries). Removes the per-layer get_rows gather from recurrent
+    // decode graphs. Output layout is identical to ggml_gated_delta_net with
+    // K = n_snap_slots.
+    GGML_API struct ggml_tensor * ggml_gated_delta_net_rows(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * states,
+            struct ggml_tensor  * rows,
+            int                   n_snap_slots);
+
+    // fold the per-head gate activations into a gated_delta_net op (scalar gate only):
+    //   beta -> sigmoid(beta),  g -> a[h] * softplus(g + dt_bias[h])
+    // dt_bias and a are F32 with H_v elements; removes four elementwise ops per layer
+    GGML_API void ggml_gated_delta_net_set_raw_gates(
+            struct ggml_tensor  * gdn,
+            struct ggml_tensor  * dt_bias,
+            struct ggml_tensor  * a);
+
+    // ARC-LAB: gated delta net with rollback by replay (independent implementation of the technique described by
+    // llamADALL). Same recurrence as ggml_gated_delta_net (scalar gate only), but instead of K state snapshots the op
+    // keeps ONE base state plus, for each later token, its update record: the per-token update is
+    // S <- g * S + k (x) delta, so a record is (delta [S_v], k [S_v], g [1]) per head, R = H*(2*S_v + 1) floats:
+    //   record = [ delta: S_v*H | k: S_v*H (head h holds k of head h % H_k) | g: H ]   (g = the decay factor exp(gate))
+    //
+    //   q, k, v, g, beta : as ggml_gated_delta_net (g: [1, H, n_tokens, n_seqs])
+    //   state : [S_v, S_v, H, n_seqs] stored base state
+    //   rec   : F32 [R*(K-1), 2, n_seqs] stored records, two banks per seq (a pass reads one bank, the caller
+    //           stores the new records in the other one)
+    //   ctrl  : I32 [2, n_seqs] = {n_rec, bank}: records 0..n_rec-1 of `bank` are first re-applied to state
+    //
+    // output, packed: [ attn scores S_v*H*n_tokens*n_seqs | base D*n_seqs | records (K-1)*R*n_seqs ], D = S_v*S_v*H
+    //   with m = min(n_tokens - 1, K - 1): base = state after token n_tokens-1-m (the oldest state a rollback of up
+    //   to m tokens can need), record j = token n_tokens-m+j for j < m; records m..K-2 are left unwritten.
+    //   Rolling back r <= m tokens = re-applying m - r records to base on the next call.
+    GGML_API struct ggml_tensor * ggml_gated_delta_net_replay(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rec,
+            struct ggml_tensor  * ctrl,
+            int                   K);
 
     // DSA lightning indexer
     //

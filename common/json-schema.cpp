@@ -244,6 +244,15 @@ class common_chat_schema_builder {
     }
 
     common_chat_schema_ptr build_node_impl(const common_json & schema, const std::string & path) {
+        // Preserve the fork's tolerance for generators that emit empty unions.
+        // Drop only schema keywords at this node; do not rewrite literal data in const/enum.
+        for (const char * key : {"oneOf", "anyOf", "type"}) {
+            if (schema.is_object() && schema.contains(key) && schema.at(key).is_array() && schema.at(key).empty()) {
+                common_json rest = schema;
+                rest.erase(key);
+                return build_node_impl(rest, path);
+            }
+        }
         if (!schema.is_object()) {
             fail(path, "schema must be an object");
         }

@@ -28,6 +28,7 @@
 #include <cinttypes>
 #include <deque>
 #include <exception>
+#include <iterator>
 #include <memory>
 #include <filesystem>
 #include <random>
@@ -292,6 +293,7 @@ struct server_slot {
     // speculative decoding
     common_speculative * spec;
     server_spec_context_state spec_context_state;
+    int32_t spec_depth_max = 0; // no drafting once the sequence is longer than this (0 = always draft)
 
     llama_tokens spec_draft;
 
@@ -474,6 +476,7 @@ struct server_slot {
 
         // note: callback_on_reset() must have run before this, see release()
         stats = {};
+        stats.speculative = can_speculate();
         n_accepted_per_pos.clear();
 
         n_predict_max = -1;
@@ -609,6 +612,12 @@ struct server_slot {
         GGML_ASSERT(task);
 
         if (!can_speculate()) {
+            return 0;
+        }
+
+        // deep in the context the draft passes and the multi-column verify cost more than the
+        // accepted tokens save (see --spec-draft-depth-max); decode one token per step from here
+        if (spec_depth_max > 0 && prompt.n_tokens() > spec_depth_max) {
             return 0;
         }
 
@@ -1561,9 +1570,35 @@ private:
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
         }
 
+        std::vector<common_speculative_type> spec_types_requested;
+        std::copy_if(params_base.speculative.types.begin(), params_base.speculative.types.end(),
+                std::back_inserter(spec_types_requested),
+                [](common_speculative_type t) { return t != COMMON_SPECULATIVE_TYPE_NONE; });
+
         if (spec) {
-            SRV_TRC("%s", "speculative decoding context initialized\n");
+            const auto spec_types_active = common_speculative_get_types(spec.get());
+            SRV_INF("speculative decoding enabled: %s\n",
+                    common_speculative_type_name_str(spec_types_active).c_str());
+
+            std::vector<common_speculative_type> spec_types_skipped;
+            for (const auto t : spec_types_requested) {
+                if (std::find(spec_types_active.begin(), spec_types_active.end(), t) == spec_types_active.end()) {
+                    spec_types_skipped.push_back(t);
+                }
+            }
+            if (!spec_types_skipped.empty()) {
+                SRV_WRN("speculative types requested but not initialized (e.g. no draft model): %s\n",
+                        common_speculative_type_name_str(spec_types_skipped).c_str());
+            }
         } else {
+            if (!spec_types_requested.empty()) {
+                SRV_WRN("speculative decoding (%s) was requested but is disabled: %s\n",
+                        common_speculative_type_name_str(spec_types_requested).c_str(),
+                        ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO
+                            ? "the target context cannot remove tokens from a sequence"
+                            : "no speculative implementation could be initialized");
+            }
+
             spec_init.reset();
             ctx_dft   = nullptr;
             model_dft = nullptr;
@@ -1582,7 +1617,10 @@ private:
             slot.ctx_dft = ctx_dft;
             slot.mem.init(ctx_tgt, ctx_dft);
             slot.spec    = spec.get();
+            slot.spec_depth_max = params_base.speculative.draft.n_depth_max;
             slot.n_ctx   = n_ctx_slot();
+
+            slot.stats.speculative = slot.can_speculate();
 
             slot.mctx                   = mctx;
             slot.prompt.tokens.has_mtmd = mctx != nullptr;
@@ -1665,7 +1703,7 @@ private:
 
         if (params_base.n_ctx_checkpoints > 0) {
             SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
-                    params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
+                    params_base.n_ctx_checkpoints, checkpoint_min_spacing());
         } else {
             SRV_TRC("%s", "context checkpoints disabled\n");
         }
@@ -1787,7 +1825,10 @@ private:
                 /* reasoning_budget      */ params_base.sampling.reasoning_budget_tokens,
                 /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
                 /* media_path            */ params_base.media_path,
-                /* force_pure_content    */ params_base.force_pure_content_parser
+                /* force_pure_content    */ params_base.force_pure_content_parser,
+                /* reasoning_effort_allow    */ params_base.reasoning_effort_allow,
+                /* reasoning_effort_fallback */ params_base.reasoning_effort_fallback,
+                /* reasoning_max_tok_floor   */ params_base.reasoning_max_tokens_floor
             };
 
             SRV_INF("chat runtime: jinja=%s, reasoning=%s, vision=%s, audio=%s, video=%s\n",
@@ -2331,18 +2372,9 @@ private:
                 });
             }
         } else {
-            std::vector<llama_token_data> cur = get_token_probabilities(ctx_tgt, idx, n_probs_request);
-            const size_t max_probs = cur.size();
-            const size_t n_probs = std::min(max_probs, n_probs_request);
-
-            // set probability for sampled token
-            for (size_t i = 0; i < max_probs; i++) {
-                // set probability for sampled token
-                if (cur[i].id == result.tok) {
-                    result.prob = cur[i].p;
-                    break;
-                }
-            }
+            // also sets the probability for the sampled token
+            std::vector<llama_token_data> cur = get_token_probabilities(ctx_tgt, idx, n_probs_request, result.tok, &result.prob);
+            const size_t n_probs = std::min(cur.size(), n_probs_request);
 
             // set probability for top n_probs tokens
             result.probs.reserve(n_probs);
@@ -2749,9 +2781,24 @@ private:
         return true;
     }
 
+    // --checkpoint-every-nt N places checkpoints N tokens apart, so it also lowers the minimum spacing: the checks
+    // use "more than spacing", so N - 1 keeps checkpoints exactly N apart (creation and eviction)
+    int32_t checkpoint_min_spacing() const {
+        const int32_t every_nt = params_base.checkpoint_every_nt;
+        return every_nt > 0 ? std::min(params_base.checkpoint_min_step, every_nt - 1) : params_base.checkpoint_min_step;
+    }
+
     // n_tokens_cur: the number of tokens added to the batch for the current slot
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
         const int id_task = slot.task->id;
+
+        // the buffers of an evicted checkpoint go to the new one: a fresh vector is zero-filled by resize()
+        std::vector<uint8_t> spare_tgt;
+        std::vector<uint8_t> spare_dft;
+        const auto keep_spare = [&](common_prompt_checkpoint & ckpt) {
+            spare_tgt = std::move(ckpt.data_tgt);
+            spare_dft = std::move(ckpt.data_dft);
+        };
 
         // evict checkpoints within min-step of a previous checkpoint, unless they were
         // created by the current task
@@ -2760,10 +2807,11 @@ private:
         for (auto it = slot.prompt.checkpoints.begin();
                 slot.prompt.checkpoints.size() + 1 >= (size_t) params_base.n_ctx_checkpoints &&
                 it != slot.prompt.checkpoints.end(); ) {
-            if (it->id_task != id_task && last >= 0 && it->n_tokens <= last + params_base.checkpoint_min_step) {
+            if (it->id_task != id_task && last >= 0 && it->n_tokens <= last + checkpoint_min_spacing()) {
                 SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                         it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
 
+                keep_spare(*it);
                 it = slot.prompt.checkpoints.erase(it);
                 continue;
             }
@@ -2774,11 +2822,12 @@ private:
 
         while (slot.prompt.checkpoints.size() >= (size_t) params_base.n_ctx_checkpoints) {
             // make room for the new checkpoint, if needed
-            const auto & cur = slot.prompt.checkpoints.front();
+            auto & cur = slot.prompt.checkpoints.front();
 
             SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
 
+            keep_spare(cur);
             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
         }
 
@@ -2798,6 +2847,9 @@ private:
         auto & cur = slot.prompt.checkpoints.emplace_back();
 
         cur.id_task = id_task;
+
+        cur.data_tgt = std::move(spare_tgt);
+        cur.data_dft = std::move(spare_dft);
 
         // [TAG_CHECKPOINTS_FIX_POS_MIN]
         // TODO: here we incorrectly deterimne that the saved checkpoint data covers the [pos_min, pos_max] range
@@ -4626,7 +4678,7 @@ private:
                             const auto pos = slot.prompt.n_tokens();
                             const auto & checkpoints = slot.prompt.checkpoints;
 
-                            if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + params_base.checkpoint_min_step) {
+                            if (pos == last_user_pos || checkpoints.empty() || pos > checkpoints.back().n_tokens + checkpoint_min_spacing()) {
                                 break;
                             }
                         }
@@ -4678,8 +4730,11 @@ private:
                         slot.init_sampler();
                     } else {
                         // skip ordinary mid-prompt checkpoints, unless the batch starts a user
-                        // message or we are near the end of the prompt
-                        if (!is_user_start && !near_prompt_end) {
+                        // message, we are near the end of the prompt, or --checkpoint-every-nt is due
+                        const bool every_nt_due = params_base.checkpoint_every_nt > 0 &&
+                            n_tokens_start >= (slot.prompt.checkpoints.empty() ? 0 : slot.prompt.checkpoints.back().n_tokens) +
+                                              params_base.checkpoint_every_nt;
+                        if (!is_user_start && !near_prompt_end && !every_nt_due) {
                             do_checkpoint = false;
                         }
                     }
@@ -4700,7 +4755,7 @@ private:
                     do_checkpoint = do_checkpoint && (
                             slot.prompt.checkpoints.empty() ||
                             is_last_user_message || near_prompt_end ||
-                            n_tokens_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
+                            n_tokens_start > slot.prompt.checkpoints.back().n_tokens + checkpoint_min_spacing());
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
@@ -4877,7 +4932,20 @@ private:
         // Batches are homogeneous in media status and speculative eligibility.
         // Each implementation consumes embeddings, rebases at a media boundary,
         // or remains stateless according to its declared policy.
-        if (spec && batch.slot_batched && batch.slot_batched->can_speculate()) {
+        //
+        // past --spec-draft-depth-max a slot does not draft, so its draft context has no use for
+        // these rows: skip the hook (and the draft-model decode it implies) when every token of this
+        // view sits beyond the cutoff. Positions, not the slot's token count, decide it, so the early
+        // ubatches of a long prompt still reach the draft context and stay reusable as a prefix.
+        bool spec_process = spec != nullptr && batch.slot_batched && batch.slot_batched->can_speculate();
+        if (spec_process && params_base.speculative.draft.n_depth_max > 0) {
+            spec_process = false;
+            for (int32_t i = 0; i < batch.view.size() && !spec_process; ++i) {
+                spec_process = batch.view.tokens[i].pos[0] <= params_base.speculative.draft.n_depth_max;
+            }
+        }
+
+        if (spec_process) {
             bool ok = true;
             queue_tasks.yield_to_queue([&]() {
                 ok = common_speculative_process(spec.get(), batch.view);

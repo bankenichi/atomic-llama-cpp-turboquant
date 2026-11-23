@@ -192,6 +192,11 @@ public:
 
     uint32_t get_n_kv(const slot_info & sinfo) const;
 
+    // ARC-LAB: get_n_kv as it would be if only the first n_rows of the applied ubatch held their cells (the KV length
+    // a decode of just those rows would attend over; chained MTP drafts size each step's view with it)
+    uint32_t get_n_kv_prefix(const slot_info & sinfo, uint32_t n_rows) const;
+    bool     get_v_trans() const { return v_trans; }
+
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
@@ -208,6 +213,23 @@ public:
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+
+    //
+    // K-cache mean-centering (see docs/kv-mean-center.md)
+    //
+
+    // load a per-layer bias file (GGUF, tensors named "kv_bar.blk.<il>.k") and enable
+    // mean-centering for every layer it covers: the bias is subtracted from the K vector
+    // right before it is written into the cache in cpy_k().
+    //
+    // when require_q4_0 is true (the default, used by the --kv-mean-center CLI flag), loading
+    // fails for any layer whose K cache type is not GGML_TYPE_Q4_0, since that is the only case
+    // this feature is intended/validated for. require_q4_0 = false is used by tests to exercise
+    // the exact same subtraction code path against an unquantized (e.g. F32) K cache, in order to
+    // validate the softmax-invariance argument without confounding it with quantization error.
+    //
+    // returns false (and logs an error) on failure; the cache is left with centering disabled.
+    bool load_kv_mean_center(const char * path, bool require_q4_0 = true);
 
     //
     // preparation API
@@ -301,6 +323,12 @@ private:
     // pre-computed hadamard martrices
     std::unordered_map<int64_t, std::vector<float>> attn_rot_hadamard;
 
+    // ARC-LAB: device copies of attn_rot_hadamard (LLAMA_SYNC_TRIM bit 2): graphs read these instead of an input that
+    // is uploaded (one sync + one blocking copy each) on every decode
+    ggml_context_ptr                          attn_rot_dev_ctx;
+    ggml_backend_buffer_ptr                   attn_rot_dev_buf;
+    std::unordered_map<int64_t, ggml_tensor *> attn_rot_dev;
+
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
 
@@ -338,6 +366,15 @@ private:
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
+
+    // K-cache mean-centering bias (see load_kv_mean_center()):
+    //   k_bar[ikv] is indexed like `layers` and is nullptr for layers without a bias, or if
+    //   centering was never enabled (k_bar.empty() in that case).
+    //   each tensor is F32, shaped [n_embd_head_k(il), n_head_kv(il)] so it broadcasts against
+    //   the [n_embd_head, n_head, n_tokens] k_cur tensor seen in cpy_k().
+    std::vector<ggml_tensor *> k_bar;
+    std::vector<ggml_context_ptr> k_bar_ctxs;
+    std::vector<ggml_backend_buffer_ptr> k_bar_bufs;
 
     size_t total_size() const;
 
@@ -418,6 +455,13 @@ public:
     //
 
     uint32_t get_n_kv() const;
+
+    // ARC-LAB: chained MTP drafts. KV length a decode of only the first n_rows of this ubatch would see, and views
+    // of the cache with an explicit length (the same views get_k / get_v return for that length)
+    uint32_t      get_n_kv_prefix(uint32_t n_rows) const;
+    ggml_tensor * get_k_n(ggml_context * ctx, int32_t il, uint32_t n_kv_view) const;
+    ggml_tensor * get_v_n(ggml_context * ctx, int32_t il, uint32_t n_kv_view) const;
+    bool          is_v_trans() const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;

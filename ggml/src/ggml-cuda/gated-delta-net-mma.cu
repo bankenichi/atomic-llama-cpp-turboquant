@@ -401,7 +401,7 @@ static gdn_path select_gdn_mma_path(int device, const ggml_cuda_gdn_mma_args & a
 #else
     // Enable only architectures benchmarked for this schedule. MMA support alone does not imply a speedup.
     if (!ampere_mma_available(info.cc) ||
-        (info.cc != GGML_CUDA_CC_AMPERE_GA10X && info.cc != GGML_CUDA_CC_ADA_LOVELACE &&
+        (info.cc != GGML_CUDA_CC_AMPERE_GA10X && info.cc != GGML_CUDA_CC_ADA_LOVELACE && info.cc != GGML_CUDA_CC_HOPPER &&
          info.cc != GGML_CUDA_CC_BLACKWELL && info.cc != GGML_CUDA_CC_DGX_SPARK)) {
         return gdn_path::ar;
     }
@@ -418,6 +418,20 @@ static gdn_path select_gdn_mma_path(int device, const ggml_cuda_gdn_mma_args & a
 }
 }  // namespace
 using namespace ggml_cuda_gated_delta_net_mma;
+
+bool ggml_cuda_gdn_mma_device_supported(int device) {
+    const int cc = ggml_cuda_info().devices[device].cc;
+#ifdef GGML_USE_HIP
+    return GGML_CUDA_CC_IS_RDNA3_5(cc);
+#elif defined(GGML_USE_MUSA)
+    GGML_UNUSED(cc);
+    return false;
+#else
+    // the architectures select_gdn_mma_path accepts
+    return ampere_mma_available(cc) && (cc == GGML_CUDA_CC_AMPERE_GA10X || cc == GGML_CUDA_CC_ADA_LOVELACE || cc == GGML_CUDA_CC_HOPPER ||
+                                        cc == GGML_CUDA_CC_BLACKWELL || cc == GGML_CUDA_CC_DGX_SPARK);
+#endif // GGML_USE_HIP
+}
 
 bool ggml_cuda_gdn_mma_launch(int device, const ggml_cuda_gdn_mma_args & a, cudaStream_t stream) {
     if (!a.state_out) {

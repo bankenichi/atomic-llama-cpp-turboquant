@@ -314,6 +314,7 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_TURBO2_0,
     GGML_TYPE_TURBO3_0,
     GGML_TYPE_TURBO4_0,
+    GGML_TYPE_PQ2_0M,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
@@ -1727,6 +1728,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"-cent", "--checkpoint-every-nt"}, "N",
+        string_format("also create a context checkpoint inside a long message every N prompt tokens, so a later prompt\n"
+                      "that diverges inside that message restores the nearest checkpoint instead of processing the whole\n"
+                      "prompt again (hybrid / recurrent models; default: %d, 0 = only at user messages and the prompt end);\n"
+                      "it also lowers --checkpoint-min-step to N, so these checkpoints are not filtered or evicted as too close",
+                      params.checkpoint_every_nt),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("checkpoint-every-nt must be non-negative");
+            }
+            params.checkpoint_every_nt = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHECKPOINT_EVERY_NT"));
+    add_opt(common_arg(
         {"-cram", "--cache-ram"}, "N",
         string_format("set the maximum cache size in MiB (default: %d, 0 for decision models, -1 - no limit, 0 - disable)"
             "[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)", params.cache_ram_mib),
@@ -1765,7 +1780,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_chunks = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL}));
+    ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL, LLAMA_EXAMPLE_KV_MEAN_CENTER}));
     add_opt(common_arg({ "-fa", "--flash-attn" }, "[on|off|auto]",
                        string_format("set Flash Attention use ('on', 'off', or 'auto', default: '%s')",
                                      llama_flash_attn_type_name(params.flash_attn_type)),
@@ -2475,6 +2490,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--kv-mean-center"}, "FNAME",
+        "path to a K-cache mean-centering bias file (GGUF), generated with tools/kv-mean-center\n"
+        "subtracts a fixed per-(head,channel) bias from K before it is quantized into the cache;\n"
+        "requires --cache-type-k q4_0 (see docs/kv-mean-center.md)",
+        [](common_params & params, const std::string & value) {
+            params.kv_mean_center_path = value;
+        }
+    ).set_env("LLAMA_ARG_KV_MEAN_CENTER"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {
@@ -3174,7 +3198,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.out_file = value;
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_CVECTOR_GENERATOR, LLAMA_EXAMPLE_EXPORT_LORA, LLAMA_EXAMPLE_TTS, LLAMA_EXAMPLE_FINETUNE,
-                    LLAMA_EXAMPLE_RESULTS, LLAMA_EXAMPLE_EXPORT_GRAPH_OPS, LLAMA_EXAMPLE_CLI}));
+                    LLAMA_EXAMPLE_RESULTS, LLAMA_EXAMPLE_EXPORT_GRAPH_OPS, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_KV_MEAN_CENTER}));
     add_opt(common_arg(
         {"-ofreq", "--output-frequency"}, "N",
         string_format("output the imatrix every N iterations (default: %d)", params.n_out_freq),
@@ -3784,6 +3808,33 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET_MESSAGE"));
     add_opt(common_arg(
+        {"--reasoning-effort-allow"}, "LIST",
+        "comma-separated reasoning_effort values to pass to the chat template; any other value in a request (or\n"
+        "chat_template_kwargs) is replaced by --reasoning-effort-fallback instead of reaching a template that\n"
+        "raises on it (e.g. \"high\" -> HTTP 500). Empty = pass everything (default)",
+        [](common_params & params, const std::string & value) {
+            params.reasoning_effort_allow = string_split<std::string>(value, ',');
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_REASONING_EFFORT_ALLOW"));
+    add_opt(common_arg(
+        {"--reasoning-effort-fallback"}, "WORD",
+        string_format("reasoning_effort used in place of a value --reasoning-effort-allow rejects (default: %s)", params.reasoning_effort_fallback.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.reasoning_effort_fallback = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_REASONING_EFFORT_FALLBACK"));
+    add_opt(common_arg(
+        {"--reasoning-max-tokens-floor"}, "N",
+        "with thinking on, raise a client max_tokens below N to N, so a small app cap does not end the request\n"
+        "inside the thinking block with no answer; --reasoning-budget still bounds the thinking. 0 = off (default)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.reasoning_max_tokens_floor = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_REASONING_MAX_TOKENS_FLOOR"));
+    add_opt(common_arg(
         {"--reasoning-preserve"},
         {"--no-reasoning-preserve"},
         "preserve reasoning trace in the full history, not just the last assistant message (default: enabled)\n"
@@ -4190,12 +4241,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
 
     add_opt(common_arg(
         {"--spec-draft-n-max"}, "N",
-        string_format("number of tokens to draft for speculative decoding (default: %d)", params.speculative.draft.n_max),
+        string_format("number of tokens to draft for speculative decoding (default: %d, %d for draft-mtp on CUDA)", params.speculative.draft.n_max, COMMON_SPEC_MTP_N_MAX_CUDA),
         [](common_params & params, int value) {
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            params.speculative.draft.n_max = value;
+            params.speculative.draft.n_max     = value;
+            params.speculative.draft.n_max_set = true;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
     add_opt(common_arg(
@@ -4206,15 +4258,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
-        {"--spec-draft-n-ubatch"}, "N",
-        string_format("physical maximum batch size of the draft context, use a smaller value to spare VRAM (default: %d - same as --n-ubatch)", params.speculative.draft.n_ubatch),
+        {"--spec-draft-n-ubatch"}, "N", "physical maximum draft batch size",
+        [](common_params & params, int value) { params.speculative.draft.n_ubatch = value; }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_UBATCH"));
+    add_opt(common_arg(
+        {"--spec-draft-depth-max"}, "N",
+        string_format("stop drafting once the sequence is longer than N tokens, 0 = never (default: %d)", params.speculative.draft.n_depth_max),
         [](common_params & params, int value) {
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            params.speculative.draft.n_ubatch = value;
+            params.speculative.draft.n_depth_max = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_UBATCH"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DRAFT_DEPTH_MAX"));
     add_opt(common_arg(
         {"--spec-synth-len"}, "L",
         "target mean synthetic acceptance length, including the target token (benchmarking only)",

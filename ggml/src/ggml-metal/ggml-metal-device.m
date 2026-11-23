@@ -1149,6 +1149,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                     dev->props.has_tensor = false;
                 }
 
+#if !GGML_METAL_EMBED_LIBRARY
+                // default.metallib has no tensor kernels, so tensor dispatch would use the wrong tile sizes
+                if (dev->props.has_tensor) {
+                    GGML_LOG_INFO("%s: tensor API disabled - precompiled metal library has no tensor kernels\n", __func__);
+                    dev->props.has_tensor = false;
+                }
+#endif
+
                 // note: disable the tensor API by default for old chips because with the current implementation it is not useful
                 // - M2 Ultra:   ~5% slower
                 // - M4, M4 Max: no significant difference
@@ -1882,6 +1890,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                            case GGML_TYPE_Q1_0:
                            case GGML_TYPE_Q2_0:
                            case GGML_TYPE_PQ2_0:
+                           // no Metal quantize_ptq1_0: a CPY into PTQ1_0 falls back to the CPU
                            case GGML_TYPE_Q4_0:
                            case GGML_TYPE_Q4_1:
                            case GGML_TYPE_Q5_0:
@@ -1912,6 +1921,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     case GGML_TYPE_Q1_0:
                     case GGML_TYPE_Q2_0:
                     case GGML_TYPE_PQ2_0:
+                    case GGML_TYPE_PTQ1_0:
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:

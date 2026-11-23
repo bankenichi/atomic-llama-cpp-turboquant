@@ -163,6 +163,29 @@ if (NOT WIN32)
     )
 endif()
 
+# dspark Phase 1 forward-graph gate (Tier 1: synthetic tap features / Tier 2:
+# diff vs the DeepSpec python reference). Not wired into `ctest` since both
+# tiers need a real dspark GGUF passed on the command line; run manually.
+# Uses internal functions not exported with LLAMA_API, so like the tests below it
+# is skipped on Windows when building with shared libraries.
+if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+    llama_build(test-dspark-forward.cpp)
+endif()
+
+# dspark loader gate for the GIDD log-SNR metadata contract: conditioning=true
+# requires finite, ordered min/max_log_snr (src/models/dspark.cpp
+# load_arch_hparams). Wired into `ctest` but skips (exit 0) until the tiny
+# random-weight variant suite is generated into the build tree:
+#   python3 tests/gen-tiny-dspark.py --suite <build>/tests/dspark-logsnr-variants
+llama_build_and_test(test-dspark-logsnr-meta.cpp LABEL "model"
+    ARGS "${CMAKE_CURRENT_BINARY_DIR}/dspark-logsnr-variants")
+
+# Requires a fixture model and reference JSON; run manually.
+llama_build(test-dspark-loop.cpp)
+
+# Requires a target/drafter pair; run manually.
+llama_build(test-dspark-real-eval.cpp)
+
 if (LLAMA_LLGUIDANCE)
     llama_build_and_test(test-grammar-llguidance.cpp  LABEL "main behavior"  ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
 endif ()
@@ -190,6 +213,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-llama-grammar.cpp  LABEL behavior  LINK llama)
     llama_build_and_test(test-batch-alloc.cpp  LABEL behavior  LINK llama)
     llama_build_and_test(test-chat.cpp  LABEL behavior  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    llama_build_and_test(test-dfly-fusion.cpp LABEL behavior)
     target_include_directories(test-chat PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
     target_link_libraries(test-chat PRIVATE server-context)
     llama_build_and_test(test-server-component.cpp  LABEL behavior)
@@ -273,6 +297,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         ENVIRONMENT "GGML_SCHED_DEBUG_REALLOC=1"
     )
 
+    llama_build_and_test(test-kv-mean-center.cpp LABEL behavior)
     llama_build(test-fusion.cpp)
 endif()
 
@@ -327,6 +352,7 @@ llama_build_and_test(test-server-spec-state.cpp  LABEL behavior)
 target_include_directories(test-server-spec-state PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 target_link_libraries(test-server-spec-state PRIVATE server-context)
 llama_build_and_test(test-model-resolution.cpp  LABEL behavior)
+llama_build_and_test(test-mtp-catchup-batch.cpp LABEL behavior)
 # the test serves its repos from an httplib server, and the library links it privately
 target_link_libraries(test-model-resolution PRIVATE cpp-httplib)
 
@@ -334,6 +360,7 @@ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
   # TODO: repair known memory leaks
   llama_build_and_test(test-opt.cpp  LABEL "main behavior backend"  LINK ggml)
 endif()
+llama_build_and_test(test-moe-weighted-reduce.cpp)
 if (GGML_METAL AND NOT GGML_BACKEND_DL)
     # calls the Metal backend's graph optimizer and fusion table directly
     llama_build_and_test(test-metal-graph-optimize.cpp  LABEL "main behavior backend"  LINK ggml ggml-metal)
@@ -360,6 +387,9 @@ if (NOT GGML_BACKEND_DL AND GGML_CPU)
     llama_build_and_test(test-col2im-1d.cpp  LABEL "main behavior backend"  LINK ggml)
     llama_build_and_test(test-conv-1d.cpp  LABEL "main behavior backend"  LINK ggml)
     llama_build_and_test(test-gelu-quick.cpp  LABEL "main behavior backend"  LINK ggml)
+    llama_build_and_test(test-ptq1_0-element-map.cpp LABEL behavior LINK ggml)
+    llama_build_and_test(test-ptq1_0-cuda-dot.cpp LABEL behavior LINK ggml)
+    llama_build_and_test(test-pq2-row-shapes.cpp LABEL behavior LINK ggml)
 endif()
 
 # libmtmd

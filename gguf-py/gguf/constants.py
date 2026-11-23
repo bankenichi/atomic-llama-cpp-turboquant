@@ -134,6 +134,13 @@ class Keys:
         MOE_LATENT_SIZE                   = "{arch}.moe_latent_size"
         POST_NORM_EPS                     = "{arch}.post_norm_epsilon"
         NEXTN_PREDICT_LAYERS              = "{arch}.nextn_predict_layers"
+        # dspark drafter (block-diffusion EAGLE-style speculative decoder)
+        DSPARK_BLOCK_SIZE                 = "{arch}.dspark.block_size"
+        DSPARK_MASK_TOKEN_ID              = "{arch}.dspark.mask_token_id"
+        DSPARK_TARGET_LAYERS              = "{arch}.dspark.target_layers"
+        DSPARK_MARKOV_RANK                = "{arch}.dspark.markov_rank"
+        DSPARK_CONFIDENCE_HEAD            = "{arch}.dspark.confidence_head"
+        DSPARK_CONFIDENCE_WITH_MARKOV     = "{arch}.dspark.confidence_head_with_markov"
         NUM_DEEPSTACK_LAYERS              = "{arch}.n_deepstack_layers"
         DEEPSTACK_MAPPING                 = "{arch}.deepstack_mapping"
         POOLING_TYPE                      = "{arch}.pooling_type"
@@ -599,6 +606,7 @@ class MODEL_ARCH(IntEnum):
     QWEN3VLMOE       = auto()
     QWEN35           = auto()
     QWEN35MOE        = auto()
+    DSPARK           = auto()
     CLEF             = auto()
     VLLM_DECISION2   = auto()
     QWEN4EXP         = auto()
@@ -1330,9 +1338,23 @@ class MODEL_TENSOR(IntEnum):
     FC                     = auto()  # feature fusion layer
     D2T                    = auto()  # draft to target vocabulary mapping
     # dspark
+    # dspark drafter
+    DSPARK_FC              = auto()
+    DSPARK_HIDDEN_NORM     = auto()
+    DSPARK_MARKOV_HEAD_A   = auto()
+    DSPARK_MARKOV_HEAD_B   = auto()
+    DSPARK_CONFIDENCE_HEAD = auto()
     DSPARK_MARKOV_W1       = auto()  # markov head: prev-token embed
     DSPARK_MARKOV_W2       = auto()  # markov head: bias projection
     DSPARK_CONF_PROJ       = auto()  # confidence head
+    # dfly
+    DFLY_LAYER_FUSION      = auto()  # per-draft-layer context mixing logits
+    DFLY_CTX_NORM          = auto()  # post-fusion context norm
+    DFLY_HC_HIDDEN_NORM    = auto()  # predecessor correction, hidden branch
+    DFLY_HC_EMBED_NORM     = auto()  # predecessor correction, embedding branch
+    DFLY_HC_GATE           = auto()
+    DFLY_HC_UP             = auto()
+    DFLY_HC_DOWN           = auto()
     ENGRAM_KV              = auto()
     ENGRAM_GATE            = auto()
     DFLASH_ATTN_CONV_BASE  = auto()
@@ -1430,6 +1452,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.QWEN3VLMOE:       "qwen3vlmoe",
     MODEL_ARCH.QWEN35:           "qwen35",
     MODEL_ARCH.QWEN35MOE:        "qwen35moe",
+    MODEL_ARCH.DSPARK:           "dspark",
     MODEL_ARCH.CLEF:             "clef",
     MODEL_ARCH.VLLM_DECISION2:   "vllm-decision2",
     MODEL_ARCH.QWEN4EXP:         "qwen4exp",
@@ -2184,7 +2207,20 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.NEXTN_HC_HEAD_DOWN:        "blk.{bid}.nextn.hc_head_down",
     MODEL_TENSOR.NEXTN_HC_HEAD_UP:          "blk.{bid}.nextn.hc_head_up",
     MODEL_TENSOR.FC:                        "fc",
+    # dspark drafter
+    MODEL_TENSOR.DSPARK_FC:                 "dspark.fc",
+    MODEL_TENSOR.DSPARK_HIDDEN_NORM:        "dspark.hidden_norm",
+    MODEL_TENSOR.DSPARK_MARKOV_HEAD_A:      "dspark.markov_head_a",
+    MODEL_TENSOR.DSPARK_MARKOV_HEAD_B:      "dspark.markov_head_b",
+    MODEL_TENSOR.DSPARK_CONFIDENCE_HEAD:    "dspark.confidence_head",
     MODEL_TENSOR.DSPARK_MARKOV_W1:          "markov_w1",
+    MODEL_TENSOR.DFLY_LAYER_FUSION:         "layer_fusion",
+    MODEL_TENSOR.DFLY_CTX_NORM:             "context_norm",
+    MODEL_TENSOR.DFLY_HC_HIDDEN_NORM:       "hidden_correction.hidden_norm",
+    MODEL_TENSOR.DFLY_HC_EMBED_NORM:        "hidden_correction.embed_norm",
+    MODEL_TENSOR.DFLY_HC_GATE:              "hidden_correction.gate",
+    MODEL_TENSOR.DFLY_HC_UP:                "hidden_correction.up",
+    MODEL_TENSOR.DFLY_HC_DOWN:              "hidden_correction.down",
     MODEL_TENSOR.DSPARK_MARKOV_W2:          "markov_w2",
     MODEL_TENSOR.DSPARK_CONF_PROJ:          "conf_proj",
     MODEL_TENSOR.ENGRAM_KV:                 "blk.{bid}.engram_kv",
@@ -3186,6 +3222,30 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.NEXTN_HNORM,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
+    ],
+    MODEL_ARCH.DSPARK: [
+        # dspark drafter: feature-reuse projection + small transformer trunk +
+        # lm head + two aux heads. Decoder blocks reuse the standard ATTN_*/FFN_*
+        # names.
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.DSPARK_FC,
+        MODEL_TENSOR.DSPARK_HIDDEN_NORM,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.DSPARK_MARKOV_HEAD_A,
+        MODEL_TENSOR.DSPARK_MARKOV_HEAD_B,
+        MODEL_TENSOR.DSPARK_CONFIDENCE_HEAD,
     ],
     MODEL_ARCH.CLEF: [
         MODEL_TENSOR.TOKEN_EMBD,
@@ -5805,6 +5865,13 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.D2T,
         # optional DSpark heads
         MODEL_TENSOR.DSPARK_MARKOV_W1,
+        MODEL_TENSOR.DFLY_LAYER_FUSION,
+        MODEL_TENSOR.DFLY_CTX_NORM,
+        MODEL_TENSOR.DFLY_HC_HIDDEN_NORM,
+        MODEL_TENSOR.DFLY_HC_EMBED_NORM,
+        MODEL_TENSOR.DFLY_HC_GATE,
+        MODEL_TENSOR.DFLY_HC_UP,
+        MODEL_TENSOR.DFLY_HC_DOWN,
         MODEL_TENSOR.DSPARK_MARKOV_W2,
         MODEL_TENSOR.DSPARK_CONF_PROJ,
         MODEL_TENSOR.DFLASH_ATTN_CONV_BASE,
@@ -6365,7 +6432,8 @@ class GGMLQuantizationType(IntEnum):
     NVFP4   = 40
     Q1_0    = 41
     Q2_0    = 42
-    PQ2_0 = 142
+    PQ2_0   = 142
+    PTQ1_0  = 143
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -6422,7 +6490,11 @@ class LlamaFileType(IntEnum):
     MOSTLY_NVFP4         = 39  # except 1d tensors
     MOSTLY_Q1_0          = 40  # except 1d tensors
     MOSTLY_Q2_0          = 41  # except 1d tensors
-    MOSTLY_PQ2_0     = 142 # except 1d tensors
+    # Must match llama_ftype in include/llama.h. Prism's gguf-py uses 128/129
+    # here, which the C loader does not recognise; keep the C values.
+    MOSTLY_PQ2_0         = 141  # except 1d tensors
+    MOSTLY_PQ2_0_LEGACY  = 142  # except 1d tensors (pre-rename PQ2_0 ftype)
+    MOSTLY_PTQ1_0        = 143  # except 1d tensors
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -6588,7 +6660,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
     GGMLQuantizationType.Q2_0:    (64, 2 + 16),
-    GGMLQuantizationType.PQ2_0: (128, 2 + 32),
+    GGMLQuantizationType.PQ2_0:   (128, 2 + 32),
+    GGMLQuantizationType.PTQ1_0:  (128, 2 + 24 + 2),
 }
 
 
