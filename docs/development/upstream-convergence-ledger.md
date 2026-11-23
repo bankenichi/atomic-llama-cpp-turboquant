@@ -50,3 +50,21 @@ DSpark sidecar, and mmproj subsequently passed focused target-only, speculative,
 vision, and transactional context-shift proofs. See
 [`bonsai-dspark-turboquant.md`](bonsai-dspark-turboquant.md) for artifacts,
 hashes, commands, and the final acceptance matrix.
+
+## 2026-11 convergence (upstream `f4f6f2e7d`, Prism `d12ca13bb`)
+
+Details, merge points and validation: [`upstream-convergence-2026-11.md`](upstream-convergence-2026-11.md).
+
+| Capability | Upstream observation at `f4f6f2e7d` | Decision/status | Proof |
+|---|---|---|---|
+| Private GGUF type IDs | Upstream claims raw 43 (`F8_E4M3`) | Adopt upstream 43; normalize only legacy 45/46; reject 44 | `test-gguf` raw 43/45/46/44 cases |
+| Prism `Q2_0_G128` | Prism renamed it `PQ2_0` (same ID 142, same layout) | Adopt Prism's name; legacy raw 42 detection unchanged | `test-backend-ops` PQ2_0 cases; Bonsai acceptance |
+| DFlash family | Split into per-head model files and speculative subclasses (#32016) | Model side adopts upstream's split with fork/Prism features re-applied; speculative side keeps the fork driver for every head | `test-dspark-legacy`, `test-dspark-logsnr-meta`, Bonsai acceptance |
+| DFlash/MTP device features | Target hidden rows read from device buffers (#31506, #31927) | Not adopted for the fork drivers (performance only; host path kept upstream) | — |
+| Server prompt cache | Moved to `server-slot-sched` with shared immutable checkpoints (#32154) | Fork coherence rules (main/draft/spec payload, `draft_synchronized`) ported | `test-server-spec-state` |
+| KV rotation | Per-layer device rotation matrices (#31073) | Adopted; Prism's ARC-LAB `attn_rot_dev` copies removed | `test-llama-context` rot column |
+| CUDA MMA FlashAttention | Head sizes 40/72, K/V rotation, `kv_rows` | Combined with Prism in-place quantized K/V and the run-time `V_is_K_view` selector; quantized path skipped with `kv_rows` | `test-backend-ops -b CUDA0` |
+| Few-row MMQ | New for batch 2-24 and `MUL_MAT_ID` | Adopted; disabled under `GGML_CUDA_BATCH_INVARIANT` | `test-backend-ops -b CUDA0` |
+| Prism fused MoE weighted reduction | — (Prism only) | Kept; aliased inputs fall back to the unfused path | `test-moe-weighted-reduce` 48/48 |
+| Recurrent state zeroing | `build_rs` fills instead of scaling by 0 (#31913) | Same change applied to Prism's rows-path cache view | `test-llama-context` qwen35 rollback/replay |
+| DSpark auto-detection | Upstream reports `draft-dflash` for every DFlash head | Fork still reports `draft-dspark` for Markov heads (requirement 8) | `test-dspark-legacy` |

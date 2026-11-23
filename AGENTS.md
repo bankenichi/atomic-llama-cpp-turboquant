@@ -38,9 +38,11 @@ while keeping the repository mergeable with future upstream releases.
    when template capability detection supports neither string nor typed parts, so
    the internal media marker cannot be dropped.
 7. **Ternary Bonsai GGUF compatibility** normalizes decisive legacy raw type 42
-   spans to Q2_0-G128 type 142. Ambiguous type 42 retains the standardized group-64
-   meaning; contradictory physical evidence fails. Old private IDs 43-46 normalize
-   to current IDs 241-244.
+   spans to type 142 (Prism `PQ2_0`, formerly named Q2_0-G128). Ambiguous type 42
+   retains the standardized group-64 meaning; contradictory physical evidence
+   fails. Old private weight IDs 45-46 normalize to TQ3_1S/TQ4_1S (243-244). Raw 43
+   is upstream F8_E4M3 and raw 44 is rejected; the old 43-44 Turbo IDs were
+   KV-cache-only and never written to model files.
 8. **DSpark** accepts modern DFlash and legacy Prism metadata, validates integer
    values strictly, and caps draft context at 4096 positions per parallel slot.
    Its target-absolute/private-local mapping slides in bounded chunks, is saved

@@ -21,7 +21,12 @@ of its parent projects.
   [`prism-ml/Ternary-Bonsai-27B-gguf`](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf)
   release. The Q2_0-G128 backend work and Prism DSpark extensions were imported
   with their Git authorship intact. Contributors visible in that imported history
-  include Pasha Khosravi and Brian / `bri-prism`.
+  include Pasha Khosravi and Brian / `bri-prism`. The 2026-11 convergence merged
+  Prism's `prism` branch through `d12ca13bb` as a real merge (238 Prism-only
+  commits, authorship intact; Prism's `master` branch is a stale upstream mirror
+  and was not used). That import renamed the format to Prism's `PQ2_0` (same ID
+  142) and added Prism's `PTQ1_0` and `PQ2_0M` types, chained MTP drafts, gated
+  delta-net replay, fused MoE weighted reduction, and Intel Arc (SYCL) work.
 - Owner benchmark target artifact: **Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF**
   ([model card](https://huggingface.co/Hikari07jp/Ternary-Bonsai-27B-Abliterated-LowDeg-GGUF)).
   The tested Q2_0 file is an abliterated low-degradation derivative of Prism's
@@ -46,7 +51,9 @@ local.
 | Core inference, GGUF, server, mtmd, generic speculative decoding | ggml-org/llama.cpp and its contributors | Upstream convergence plus private compatibility hooks |
 | Gemma 4 assistant MTP and Qwen NextN lineage | AtomicBot-ai fork history; contributions include Biogenic Ooze / Ooze and other credited commit authors | Migrated to current `draft-mtp`, preserved historical assistant GGUFs, added vision/cache coherence |
 | TurboQuant KV and TQ3/TQ4 weight formats | AtomicBot-ai fork history and its contributors, including Tom Turney / `TheTom` where recorded | Private GGUF IDs moved away from upstream assignments; Bonsai mixed-KV CUDA dispatch fixed |
-| Q2_0-G128 ternary backend | PrismML-Eng fork; imported commits retain Pasha Khosravi and Brian / `bri-prism` authorship | Legacy raw-type-42 detection and collision-free runtime ID 142 |
+| PQ2_0 (formerly Q2_0-G128) ternary backend | PrismML-Eng fork; imported commits retain Pasha Khosravi and Brian / `bri-prism` authorship | Legacy raw-type-42 detection and collision-free runtime ID 142 |
+| PTQ1_0 / PQ2_0M types, MTP chained drafts, GDN replay, fused MoE reduction, Arc/SYCL work | PrismML-Eng `prism` branch through `d12ca13bb` (2026-11 import), authorship intact | Kept next to upstream's newer implementations; aliased-input guard added to the fused MoE reduction |
+| F8_E4M3 weights and FP8 KV cache | ggml-org/llama.cpp (GGUF type 43) | Took over raw ID 43 from this fork's retired Turbo3 ID; only 45/46 are still normalized |
 | DSpark | Upstream llama.cpp DSpark work (including [PR #25173](https://github.com/ggml-org/llama.cpp/pull/25173) and [PR #26275](https://github.com/ggml-org/llama.cpp/pull/26275)) plus PrismML-Eng's block-diffusion/GIDD extensions | Legacy Prism metadata namespace, strict parsing, context/vocabulary bounds, and M-RoPE-aware target-feature pooling for image prefill |
 | Media-aware speculative decoding | Upstream EAGLE3 ([PR #18039](https://github.com/ggml-org/llama.cpp/pull/18039)), DFlash/DSpark, and MTP drivers; Atomic mmproj/speculation coexistence direction by Biogenic Ooze at commit `ead60fb4f` | Per-implementation media policies, compact EAGLE/draft-simple position domains, retained-image MTP bridging, and isolated failure finalization |
 | Expert upload overlap and mmap host pinning | thecodacus branch linked above | Windows `GetSystemInfo` page handling and this fork's env-gated integration |
@@ -76,6 +83,9 @@ Named contributor summary (non-exhaustive; Git history remains authoritative):
 - Prism Q2_0-G128 history records Pasha Khosravi for the core, CPU, CUDA, Metal,
   quantization, and row-dispatch series, with Brian / `bri-prism` contributing
   AVX-512 and follow-up integration/fixes.
+- The 2026-11 Prism import is mostly Brian / `bri-prism` (134 commits) and Pasha
+  Khosravi (44), with further commits by Cary Palmer, sb32445, Scott Guyton,
+  lenny76, and others recorded in the merged history.
 
 Where an external model, conversion, importance matrix, or projector is used, its
 own model card and license remain controlling for that artifact. In particular,

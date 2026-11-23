@@ -10,6 +10,14 @@ The convergence branch merged upstream through `d775b8967` and Prism work throug
 `0810d4bfb`, then reapplied private behavior against the modern model, server,
 speculative, and GGUF APIs.
 
+The 2026-11 round (`integration/upstream-convergence-2026-11`) continued from
+`19265bcd0` with real merges of upstream `46847e615` (`8098b4779`), upstream
+`d854d98ba` (`fafb88636`), Prism `prism/prism` `d12ca13bb` (`9b99a704d`, brought in
+as `36546fd04`) and upstream `f4f6f2e7d` (`1503ae990`, brought in as `8f2f728d5`).
+See [`upstream-convergence-2026-11.md`](upstream-convergence-2026-11.md) for the
+conflicts, decisions and validation of that round. Where this file and that one
+disagree, the 2026-11 file is current.
+
 ## Provenance and merge boundaries
 
 This effort combines independent lines of work; “convergence” does not mean local
@@ -41,7 +49,8 @@ and should not be flattened during future rebases.
 ### Ternary Bonsai
 
 The Bonsai base uses a group-128 Q2_0 physical format. Runtime type
-`GGML_TYPE_Q2_0_G128` is assigned collision-free ID 142. Published Prism GGUFs
+`GGML_TYPE_PQ2_0` (named `GGML_TYPE_Q2_0_G128` before the 2026-11 round) is
+assigned collision-free ID 142. Published Prism GGUFs
 predate that assignment and encode the format under raw type 42, which current
 upstream assigns to group-64 Q2_0.
 
@@ -54,9 +63,10 @@ The GGUF reader resolves this collision from tensor spans:
 - if all spans are alignment-ambiguous, raw 42 retains its standardized group-64
   meaning because the published legacy metadata contains no reliable discriminator.
 
-Private TurboQuant/TQ types moved to IDs 240-244. Historical on-disk types 43-46
-are unambiguous and normalize to 241-244. Historical Turbo2 ID 42 is not claimed:
-Turbo2 was a runtime KV format, while its bytes collide with Prism Q2_0-G128.
+Private TurboQuant/TQ types moved to IDs 240-244. Historical on-disk weight types
+45/46 normalize to TQ3_1S/TQ4_1S (243/244). Since the 2026-11 round, raw 43 is
+upstream `F8_E4M3` and raw 44 is rejected; the old 42-44 Turbo IDs were runtime
+KV formats never written to model files.
 
 ### DSpark
 
@@ -188,8 +198,9 @@ streams, enforces a readiness deadline, and reports its PID and log paths as JSO
 .\scripts\start-hidden-atomic-server.ps1 -Stack Qwen    -ContextSize 8192  -Port 8099
 ```
 
-The helper intentionally uses the owner's exact filenames under
-`C:\Program Files\llamacpp`; it is regression infrastructure, not a portable
+The helper intentionally uses the owner's exact filenames; `-ModelRoot` names
+their directory (default `C:\Program Files\llamacpp`, for example
+`-ModelRoot 'D:\LLM Models'`). It is regression infrastructure, not a portable
 model-discovery wrapper. On success the caller owns the returned process and must
 stop it after requests finish. On load failure or readiness timeout the helper
 terminates its own child so a failed run cannot strand VRAM.
