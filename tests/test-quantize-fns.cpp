@@ -338,6 +338,14 @@ static int test_vec_dot_q(bool verbose) {
             continue;
         }
 
+        // S1_32 stores signs only (its scales are separate tensors), so the error bounds below, which measure how well a
+        // type fits real values, do not describe it; test-s1-32 checks its round trip and its dot product exactly.
+        if (type == GGML_TYPE_S1_32) {
+            printf("Testing %s (skipped: sign-only type, see test-s1-32)\n", ggml_type_name(type));
+            fflush(stdout);
+            continue;
+        }
+
         const ggml_type ei = (ggml_type)i;
 
         printf("Testing %s\n", ggml_type_name((ggml_type) i));

@@ -438,6 +438,10 @@ if (NOT GGML_BACKEND_DL AND GGML_CPU)
     llama_build_and_test(test-ptq1_0-element-map.cpp LABEL behavior LINK ggml)
     llama_build_and_test(test-ptq1_0-cuda-dot.cpp LABEL behavior LINK ggml)
     llama_build_and_test(test-pq2-row-shapes.cpp LABEL behavior LINK ggml)
+    # moeq binary-factor experts: the S1_32 sign type, and the factored op sequence on the Q8_0 and the float path
+    llama_build_and_test(test-s1-32.cpp LABEL behavior LINK ggml)
+    llama_build_and_test(test-factored-experts.cpp LABEL behavior LINK ggml)
+    llama_test(test-factored-experts NAME test-factored-experts-f32 LABEL behavior ARGS f32)
 endif()
 
 # libmtmd

@@ -13537,6 +13537,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, m, 2, 1024, { 1, 1 }, { 1, 1 }));
     }
 
+    // moeq binary-factor experts (S1_32 sign factors). K is a rank or a width: always a multiple of 32, often not of
+    // 128 or 256 (320, 416, 480, 640), so the row tails of every kernel are exercised; 1-8 columns (decode) and 512.
+    for (int64_t k : { 32, 320, 416, 480, 512, 640, 1024, 2048 }) {
+        for (int n : { 1, 3, 8, 512 }) {
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_S1_32, GGML_TYPE_F32, 96, n, k, { 1, 1 }, { 1, 1 }));
+        }
+    }
+    // MUL_MAT_ID at the real bank shapes, sign(V)^T step (m = rank, k = width) then sign(U) step (m = width, k = rank):
+    // Granite-1B at 0.974 bpw (32 experts, 8 used: in-bank 1024 x 1024 at rank 480, out-bank 1024 x 512 at rank 320) and
+    // Qwen3.6-35B-A3B at the 0.67 target (256 experts, 8 used: in-bank 1024 x 2048 at rank 416, out-bank 2048 x 512 at 256)
+    {
+        struct factor_step { int n_mats; int n_used; int64_t m; int64_t k; };
+        const factor_step steps[] = {
+            {  32, 8,  480, 1024 }, {  32, 8, 1024,  480 }, {  32, 8,  320,  512 }, {  32, 8, 1024,  320 },
+            { 256, 8,  416, 2048 }, { 256, 8, 1024,  416 }, { 256, 8,  256,  512 }, { 256, 8, 2048,  256 },
+        };
+        for (const factor_step & s : steps) {
+            for (int n : { 1, 4, 8, 32, 512 }) {
+                test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, s.n_mats, s.n_used, false, s.m, n, s.k));
+            }
+        }
+        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, 32, 8, true, 480, 16, 1024));
+        test_cases.emplace_back(new test_get_rows(GGML_TYPE_S1_32, 480, 64, 8, 1, 1, false));
+    }
+
     // ARC-LAB: ternary int8 coopmat GEMM path (Vulkan, GGML_VK_TERN_I8_MIN_N): rows % 128 == 0, several N incl. partial tiles
     for (ggml_type t : {GGML_TYPE_PTQ1_0, GGML_TYPE_PQ2_0}) {
         for (int n : {9, 64, 100}) {
