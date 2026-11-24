@@ -656,6 +656,10 @@ static ggml_backend_feature * ggml_backend_cpu_get_features(ggml_backend_reg_t r
     GGML_UNUSED(reg);
 }
 
+// defined in ggml-cpu.c; deliberately not in ggml-cpu.h (fork-private, reached only through the proc address)
+extern "C" void ggml_backend_cpu_set_s1_32_dot_mode(int mode);
+extern "C" int  ggml_backend_cpu_get_s1_32_dot_mode(void);
+
 static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     if (strcmp(name, "ggml_backend_set_n_threads") == 0) {
         ggml_backend_set_n_threads_t fct = ggml_backend_cpu_set_n_threads;
@@ -679,6 +683,13 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     }
     if (strcmp(name, "ggml_backend_cpu_set_use_ref") == 0) {
         return (void *)ggml_backend_cpu_set_use_ref;
+    }
+    // fork-private, moeq S1_32: activation precision of sign-factor products (ggml-cpu.c), for tests and reference runs
+    if (strcmp(name, "ggml_backend_cpu_set_s1_32_dot_mode") == 0) {
+        return (void *)ggml_backend_cpu_set_s1_32_dot_mode;
+    }
+    if (strcmp(name, "ggml_backend_cpu_get_s1_32_dot_mode") == 0) {
+        return (void *)ggml_backend_cpu_get_s1_32_dot_mode;
     }
 
     // threadpool - TODO:  move to ggml-base

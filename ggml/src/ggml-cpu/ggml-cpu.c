@@ -505,10 +505,28 @@ const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type
     return &type_traits_cpu[type];
 }
 
-// GGML_S1_32_DOT=f32 makes every S1_32 matrix product read its activations in F32 (ggml_vec_dot_s1_32_f32) instead of
-// quantizing them to Q8_0: the float reference path for checking a packed moeq model against its dense export.
-// Set from the environment in ggml_cpu_init(); ggml_cpu_set_s1_32_dot_f32() may change it between graph computations.
-static bool ggml_cpu_s1_32_f32_dot = false;
+// Activation precision of S1_32 (moeq sign factor) matrix products, a test and reference switch, off by default:
+//   0  Q8_0 activations (the production path)
+//   1  F32 activations in every S1_32 product (ggml_vec_dot_s1_32_f32): the float reference path for checking a
+//      packed moeq model against its dense export
+//   2  F32 only in each bank's first product (sign(V)^T, tensors named "*_exps_v*"), Q8_0 elsewhere
+//   3  F32 only in each bank's second product (sign(U), tensors named "*_exps_u*"), Q8_0 elsewhere
+// Modes 2 and 3 exist to measure which product the 8-bit path's error comes from. Set from GGML_S1_32_DOT
+// (f32, f32_v, f32_u) in ggml_cpu_init(); ggml_backend_cpu_set_s1_32_dot_mode() (reached through the CPU backend's
+// proc address of the same name, not a public header) changes it between graph computations only.
+static int ggml_cpu_s1_32_dot_mode = 0;
+
+static inline bool ggml_cpu_s1_32_f32(const struct ggml_tensor * src0) {
+    if (src0->type != GGML_TYPE_S1_32 || ggml_cpu_s1_32_dot_mode == 0) {
+        return false;
+    }
+    switch (ggml_cpu_s1_32_dot_mode) {
+        case 1:  return true;
+        case 2:  return strstr(src0->name, "_exps_v") != NULL;
+        case 3:  return strstr(src0->name, "_exps_u") != NULL;
+        default: return false;
+    }
+}
 
 //
 // Threading defs
@@ -1292,7 +1310,7 @@ static inline enum ggml_type ggml_cpu_vec_dot_type(const struct ggml_tensor * sr
     if (ggml_cpu_pq2_needs_q8_0(src0)) {
         return GGML_TYPE_Q8_0;
     }
-    if (src0->type == GGML_TYPE_S1_32 && ggml_cpu_s1_32_f32_dot) {
+    if (ggml_cpu_s1_32_f32(src0)) {
         return GGML_TYPE_F32;
     }
     return type_traits_cpu[src0->type].vec_dot_type;
@@ -1302,7 +1320,7 @@ static inline ggml_vec_dot_t ggml_cpu_vec_dot(const struct ggml_tensor * src0) {
     if (ggml_cpu_pq2_needs_q8_0(src0)) {
         return ggml_vec_dot_pq2_0_q8_0;
     }
-    if (src0->type == GGML_TYPE_S1_32 && ggml_cpu_s1_32_f32_dot) {
+    if (ggml_cpu_s1_32_f32(src0)) {
         return ggml_vec_dot_s1_32_f32;
     }
     return type_traits_cpu[src0->type].vec_dot;
@@ -4115,14 +4133,19 @@ int ggml_cpu_has_sme2(void) {
 #endif
 }
 
-void ggml_cpu_set_s1_32_dot_f32(bool enable) {
+// declared in ggml-cpu.cpp, which hands them out as CPU backend proc addresses
+void ggml_backend_cpu_set_s1_32_dot_mode(int mode);
+int  ggml_backend_cpu_get_s1_32_dot_mode(void);
+
+void ggml_backend_cpu_set_s1_32_dot_mode(int mode) {
     ggml_cpu_init(); // reads GGML_S1_32_DOT on its first call; the value set here overrides it
-    ggml_cpu_s1_32_f32_dot = enable;
+    GGML_ASSERT(mode >= 0 && mode <= 3);
+    ggml_cpu_s1_32_dot_mode = mode;
 }
 
-bool ggml_cpu_get_s1_32_dot_f32(void) {
+int ggml_backend_cpu_get_s1_32_dot_mode(void) {
     ggml_cpu_init();
-    return ggml_cpu_s1_32_f32_dot;
+    return ggml_cpu_s1_32_dot_mode;
 }
 
 void ggml_cpu_init(void) {
@@ -4201,9 +4224,22 @@ void ggml_cpu_init(void) {
 
         {
             const char * env = getenv("GGML_S1_32_DOT");
-            ggml_cpu_s1_32_f32_dot = (env != NULL && strcmp(env, "f32") == 0);
-            if (ggml_cpu_s1_32_f32_dot) {
-                GGML_LOG_WARN("%s: GGML_S1_32_DOT=f32: S1_32 matrix products use F32 activations (float reference path)\n", __func__);
+            ggml_cpu_s1_32_dot_mode = 0;
+            if (env != NULL) {
+                if (strcmp(env, "f32") == 0) {
+                    ggml_cpu_s1_32_dot_mode = 1;
+                } else if (strcmp(env, "f32_v") == 0) {
+                    ggml_cpu_s1_32_dot_mode = 2;
+                } else if (strcmp(env, "f32_u") == 0) {
+                    ggml_cpu_s1_32_dot_mode = 3;
+                } else if (strcmp(env, "q8") != 0 && env[0] != '\0') {
+                    GGML_LOG_WARN("%s: GGML_S1_32_DOT=%s not understood (q8, f32, f32_v, f32_u); using q8\n", __func__, env);
+                }
+            }
+            if (ggml_cpu_s1_32_dot_mode != 0) {
+                GGML_LOG_WARN("%s: GGML_S1_32_DOT=%s: S1_32 matrix products use F32 activations (%s; float reference path)\n",
+                    __func__, env, ggml_cpu_s1_32_dot_mode == 1 ? "every product" :
+                    ggml_cpu_s1_32_dot_mode == 2 ? "first product of each bank only" : "second product of each bank only");
             }
         }
 
