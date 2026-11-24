@@ -4320,6 +4320,30 @@ ggml_tensor * llama_model_base::create_tensor(const LLM_TN_IMPL & tn, const std:
     return create_tensor(*ml, tn, ne, flags);
 }
 
+// moeq binary-factor banks: the signs must be S1_32 and the scales F16 or F32; a tensor of another type under one of
+// these names would otherwise load and compute an ordinary matrix product with another meaning (stage-1 review,
+// finding 3). A tensor that was not created (a skipped layer) is not checked.
+static void check_factor_bank_types(const llama_factor_bank & bank, int bid) {
+    auto check = [bid](const ggml_tensor * t, bool sign) {
+        if (t == nullptr) {
+            return;
+        }
+        const bool ok = sign ? t->type == GGML_TYPE_S1_32 : (t->type == GGML_TYPE_F16 || t->type == GGML_TYPE_F32);
+        if (!ok) {
+            throw std::runtime_error(format("layer %d: binary-factor tensor %s has type %s, expected %s", bid, t->name,
+                    ggml_type_name(t->type), sign ? ggml_type_name(GGML_TYPE_S1_32) : "f16 or f32"));
+        }
+    };
+    check(bank.v, true);
+    check(bank.u, true);
+    check(bank.s_pre, false);
+    check(bank.s_post, false);
+    if (bank.v != nullptr && bank.v->ne[1] % 32 != 0) {
+        throw std::runtime_error(format("layer %d: binary-factor tensor %s has rank %lld, not a multiple of 32", bid,
+                bank.v->name, (long long) bank.v->ne[1]));
+    }
+}
+
 bool llama_model_base::create_tensor_factored_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
     GGML_ASSERT(ml != nullptr);
 
@@ -4350,6 +4374,46 @@ bool llama_model_base::create_tensor_factored_exps(llama_layer & layer, int bid,
     dn.u      = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_U, "weight", bid), { r_dn,     n_embd_,  n_expert_ }, flags);
     dn.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_V, "scale",  bid), { n_ff_,    1,        n_expert_ }, flags);
     dn.s_post = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_U, "scale",  bid), { n_embd_,  1,        n_expert_ }, flags);
+
+    check_factor_bank_types(gu, bid);
+    check_factor_bank_types(dn, bid);
+
+    return true;
+}
+
+bool llama_model_base::create_tensor_factored_ffn(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int flags) {
+    GGML_ASSERT(ml != nullptr);
+
+    const std::string gu_v = tn(LLM_TENSOR_FFN_GATE_UP_V, "weight", bid);
+    const std::string dn_v = tn(LLM_TENSOR_FFN_DOWN_V,    "weight", bid);
+    const ggml_tensor * meta_gu = ml->get_tensor_meta(gu_v.c_str());
+    const ggml_tensor * meta_dn = ml->get_tensor_meta(dn_v.c_str());
+    if (meta_gu == nullptr && meta_dn == nullptr) {
+        return false;
+    }
+    if (meta_gu == nullptr || meta_dn == nullptr) {
+        throw std::runtime_error(format("layer %d has a binary-factor feed-forward for only one bank (%s %s, %s %s)", bid,
+                gu_v.c_str(), meta_gu ? "present" : "missing", dn_v.c_str(), meta_dn ? "present" : "missing"));
+    }
+
+    // the ranks are the file's own; sign(V)^T is [n_in, r]
+    const int64_t r_gu = meta_gu->ne[1];
+    const int64_t r_dn = meta_dn->ne[1];
+
+    auto & gu = layer.ffn_gate_up_f;
+    gu.v      = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_V,       "weight", bid), { n_embd_, r_gu    }, flags);
+    gu.u      = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_U,       "weight", bid), { r_gu,    2*n_ff_ }, flags);
+    gu.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_V_SCALE, "scale",  bid), { n_embd_          }, flags);
+    gu.s_post = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_U_SCALE, "scale",  bid), { 2*n_ff_          }, flags);
+
+    auto & dn = layer.ffn_down_f;
+    dn.v      = create_tensor(tn(LLM_TENSOR_FFN_DOWN_V,          "weight", bid), { n_ff_,   r_dn    }, flags);
+    dn.u      = create_tensor(tn(LLM_TENSOR_FFN_DOWN_U,          "weight", bid), { r_dn,    n_embd_ }, flags);
+    dn.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_DOWN_V_SCALE,    "scale",  bid), { n_ff_            }, flags);
+    dn.s_post = create_tensor(tn(LLM_TENSOR_FFN_DOWN_U_SCALE,    "scale",  bid), { n_embd_          }, flags);
+
+    check_factor_bank_types(gu, bid);
+    check_factor_bank_types(dn, bid);
 
     return true;
 }

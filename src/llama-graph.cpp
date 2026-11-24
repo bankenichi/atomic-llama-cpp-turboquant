@@ -1992,6 +1992,38 @@ ggml_tensor * llm_graph_context::build_factored_mm_id(
     return res.y;
 }
 
+ggml_tensor * llm_graph_context::build_factored_ffn(
+        const llama_factor_bank & gate_up,
+        const llama_factor_bank & down,
+                ggml_tensor * cur,
+                        int   il) const {
+    GGML_ASSERT(gate_up.present() && gate_up.u && gate_up.s_pre && gate_up.s_post);
+    GGML_ASSERT(down.present() && down.u && down.s_pre && down.s_post);
+
+    const llm_factored_mm_id_result gu = llm_build_factored_mm(ctx0, gate_up.v, gate_up.u, gate_up.s_pre, gate_up.s_post, cur);
+    cb(gu.x_scaled,   "ffn_f_gate_up_xs", il);
+    cb(gu.z,          "ffn_f_gate_up_z",  il);
+    cb(gu.y_unscaled, "ffn_f_gate_up_uz", il);
+    cb(gu.y,          "ffn_f_gate_up",    il);
+
+    // gate rows first, then up (moeq's w_in), split by two views as build_moe_ffn's merged gate_up path does
+    const int64_t n_ff = gu.y->ne[0] / 2;
+    ggml_tensor * gate = ggml_view_2d(ctx0, gu.y, n_ff, gu.y->ne[1], gu.y->nb[1], 0);
+    ggml_tensor * up   = ggml_view_2d(ctx0, gu.y, n_ff, gu.y->ne[1], gu.y->nb[1], n_ff*gu.y->nb[0]);
+    cb(gate, "ffn_f_gate", il);
+    cb(up,   "ffn_f_up",   il);
+
+    cur = ggml_swiglu_split(ctx0, gate, up);
+    cb(cur, "ffn_f_swiglu", il);
+
+    const llm_factored_mm_id_result dn = llm_build_factored_mm(ctx0, down.v, down.u, down.s_pre, down.s_post, cur);
+    cb(dn.x_scaled,   "ffn_f_down_xs", il);
+    cb(dn.z,          "ffn_f_down_z",  il);
+    cb(dn.y_unscaled, "ffn_f_down_uz", il);
+
+    return dn.y;
+}
+
 ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * w,   // ggml_tensor * as
           ggml_tensor * cur, // ggml_tensor * b

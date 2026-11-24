@@ -636,6 +636,14 @@ enum llm_tensor {
     LLM_TENSOR_FFN_GATE_UP_EXPS_U, //   sign(U) [r, out, E] (.weight) and s_post (.scale)
     LLM_TENSOR_FFN_DOWN_EXPS_V,
     LLM_TENSOR_FFN_DOWN_EXPS_U,
+    LLM_TENSOR_FFN_GATE_UP_V,       // binary-factor dense FFN (moeq, e.g. Qwen3.5): sign(V)^T [n_embd, r] (.weight)
+    LLM_TENSOR_FFN_GATE_UP_U,       //   sign(U) [r, 2*n_ff] (.weight)
+    LLM_TENSOR_FFN_DOWN_V,
+    LLM_TENSOR_FFN_DOWN_U,
+    LLM_TENSOR_FFN_GATE_UP_V_SCALE, //   s_pre [n_embd] (.scale of ffn_gate_up_v; own id: read by a cast, not a matmul)
+    LLM_TENSOR_FFN_GATE_UP_U_SCALE, //   s_post [2*n_ff] (.scale of ffn_gate_up_u)
+    LLM_TENSOR_FFN_DOWN_V_SCALE,
+    LLM_TENSOR_FFN_DOWN_U_SCALE,
     LLM_TENSOR_FFN_DOWN_SHEXP,
     LLM_TENSOR_FFN_GATE_SHEXP,
     LLM_TENSOR_FFN_UP_SHEXP,

@@ -98,9 +98,12 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
             layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, flags);
         }
 
-        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
-        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
-        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        // moeq binary factors replace the three feed-forward matrices when the file has them
+        if (!create_tensor_factored_ffn(layer, il, n_embd, n_ff, flags)) {
+            layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
+            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
+            layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        }
     };
 
     auto load_block_mtp = [&](int il) {
@@ -645,6 +648,13 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 ggml_tensor * llama_model_qwen35::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
     // Qwen3.5 does not use MoE FFN
     GGML_ASSERT(model.layers[il].ffn_gate_inp == nullptr);
+
+    // moeq binary factors (a packed student's quantized blocks; the other blocks keep their matrices)
+    if (model.layers[il].ffn_gate_up_f.present()) {
+        cur = build_factored_ffn(model.layers[il].ffn_gate_up_f, model.layers[il].ffn_down_f, cur, il);
+        cb(cur, "ffn_out", il);
+        return cur;
+    }
 
     cur = build_ffn(cur,
         model.layers[il].ffn_up, NULL, model.layers[il].ffn_up_s,

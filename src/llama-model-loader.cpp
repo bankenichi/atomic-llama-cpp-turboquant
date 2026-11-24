@@ -1167,6 +1167,11 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
             {
                 op_tensor = ggml_scale(ctx, w, 1.0f);
             } break;
+        case GGML_OP_CPY:
+            {
+                // a weight read through a cast to F32 (e.g. the F16 scales of binary-factor banks)
+                op_tensor = ggml_cast(ctx, w, GGML_TYPE_F32);
+            } break;
         default:
             GGML_ABORT("%s: missing test for op %s for tensor %s", __func__, ggml_op_name(op), w->name);
     }

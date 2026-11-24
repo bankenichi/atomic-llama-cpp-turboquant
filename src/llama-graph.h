@@ -1315,6 +1315,14 @@ struct llm_graph_context {
                      const char * name,
                              int   il) const;
 
+    // a dense SwiGLU feed-forward as moeq binary factors (see llama-factored.h, llm_build_factored_mm): the fused
+    // gate+up bank (gate rows first), silu(gate) * up, then the down bank; cur: [n_embd, n_tokens] -> [n_embd, n_tokens]
+    ggml_tensor * build_factored_ffn(
+            const llama_factor_bank & gate_up,
+            const llama_factor_bank & down,
+                    ggml_tensor * cur,
+                            int   il) const;
+
     // read rows of a token-embedding table; a Hadamard-latent table gets the
     // inverse transform so the result is in the primal basis
     ggml_tensor * build_embd_rows(
