@@ -22,6 +22,7 @@ else()
     add_subdirectory(completion)
     add_subdirectory(perplexity)
     add_subdirectory(kld-compare)
+    add_subdirectory(logits-dump)
     add_subdirectory(quantize)
     if (LLAMA_BUILD_SERVER)
         # the chat app lives in ui/apps/chat, outside tools/
