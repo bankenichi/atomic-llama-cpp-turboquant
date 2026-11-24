@@ -4320,6 +4320,40 @@ ggml_tensor * llama_model_base::create_tensor(const LLM_TN_IMPL & tn, const std:
     return create_tensor(*ml, tn, ne, flags);
 }
 
+bool llama_model_base::create_tensor_factored_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
+    GGML_ASSERT(ml != nullptr);
+
+    const std::string gu_v = tn(LLM_TENSOR_FFN_GATE_UP_EXPS_V, "weight", bid);
+    const std::string dn_v = tn(LLM_TENSOR_FFN_DOWN_EXPS_V,    "weight", bid);
+    const ggml_tensor * meta_gu = ml->get_tensor_meta(gu_v.c_str());
+    const ggml_tensor * meta_dn = ml->get_tensor_meta(dn_v.c_str());
+    if (meta_gu == nullptr && meta_dn == nullptr) {
+        return false;
+    }
+    if (meta_gu == nullptr || meta_dn == nullptr) {
+        throw std::runtime_error(format("layer %d has binary-factor experts for only one bank (%s %s, %s %s)", bid,
+                gu_v.c_str(), meta_gu ? "present" : "missing", dn_v.c_str(), meta_dn ? "present" : "missing"));
+    }
+
+    // the ranks are the files' own; sign(V)^T is [n_in, r, n_expert]
+    const int64_t r_gu = meta_gu->ne[1];
+    const int64_t r_dn = meta_dn->ne[1];
+
+    auto & gu = layer.ffn_gate_up_exps_f;
+    gu.v      = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS_V, "weight", bid), { n_embd_,  r_gu,     n_expert_ }, flags);
+    gu.u      = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS_U, "weight", bid), { r_gu,     2*n_ff_,  n_expert_ }, flags);
+    gu.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS_V, "scale",  bid), { n_embd_,  1,        n_expert_ }, flags);
+    gu.s_post = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS_U, "scale",  bid), { 2*n_ff_,  1,        n_expert_ }, flags);
+
+    auto & dn = layer.ffn_down_exps_f;
+    dn.v      = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_V, "weight", bid), { n_ff_,    r_dn,     n_expert_ }, flags);
+    dn.u      = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_U, "weight", bid), { r_dn,     n_embd_,  n_expert_ }, flags);
+    dn.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_V, "scale",  bid), { n_ff_,    1,        n_expert_ }, flags);
+    dn.s_post = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_U, "scale",  bid), { n_embd_,  1,        n_expert_ }, flags);
+
+    return true;
+}
+
 void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
     if (flags & TENSOR_SKIP) {
         const int skip = TENSOR_NOT_REQUIRED | TENSOR_SKIP;

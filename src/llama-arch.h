@@ -632,6 +632,10 @@ enum llm_tensor {
     LLM_TENSOR_FFN_GATE_EXPS,
     LLM_TENSOR_FFN_UP_EXPS,
     LLM_TENSOR_FFN_GATE_UP_EXPS,
+    LLM_TENSOR_FFN_GATE_UP_EXPS_V, // binary-factor experts (moeq): sign(V)^T [in, r, E] (.weight) and s_pre (.scale)
+    LLM_TENSOR_FFN_GATE_UP_EXPS_U, //   sign(U) [r, out, E] (.weight) and s_post (.scale)
+    LLM_TENSOR_FFN_DOWN_EXPS_V,
+    LLM_TENSOR_FFN_DOWN_EXPS_U,
     LLM_TENSOR_FFN_DOWN_SHEXP,
     LLM_TENSOR_FFN_GATE_SHEXP,
     LLM_TENSOR_FFN_UP_SHEXP,

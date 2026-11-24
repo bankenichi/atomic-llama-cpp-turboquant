@@ -1,4 +1,5 @@
 #include "llama-graph.h"
+#include "llama-factored.h"
 
 #include "llama-impl.h"
 #include "llama-model.h"
@@ -1973,6 +1974,24 @@ llm_graph_amax_src1 llm_graph_context::build_amax_src1_f16(
     return result;
 }
 
+ggml_tensor * llm_graph_context::build_factored_mm_id(
+        const llama_factor_bank & bank,
+                ggml_tensor * cur,
+                ggml_tensor * ids,
+                 const char * name,
+                         int   il) const {
+    GGML_ASSERT(bank.present() && bank.u && bank.s_pre && bank.s_post);
+
+    const llm_factored_mm_id_result res = llm_build_factored_mm_id(ctx0, bank.v, bank.u, bank.s_pre, bank.s_post, cur, ids);
+
+    const std::string base = name;
+    cb(res.x_scaled,   (base + "_xs").c_str(), il);
+    cb(res.z,          (base + "_z").c_str(),  il);
+    cb(res.y_unscaled, (base + "_uz").c_str(), il);
+
+    return res.y;
+}
+
 ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * w,   // ggml_tensor * as
           ggml_tensor * cur, // ggml_tensor * b
@@ -2441,6 +2460,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
 
+    // moeq binary-factor experts: the layer holds a fused gate+up bank and a down bank instead of expert matrices
+    const llama_layer * layer_f = il >= 0 && il < (int) model.layers.size() ? &model.layers[il] : nullptr;
+    const bool factored = down_exps == nullptr && gate_up_exps == nullptr && layer_f != nullptr &&
+        layer_f->ffn_gate_up_exps_f.present() && layer_f->ffn_down_exps_f.present();
+    if (factored) {
+        GGML_ASSERT(up_exps == nullptr && gate_exps == nullptr && up_exps_b == nullptr && gate_exps_b == nullptr &&
+                down_exps_b == nullptr && gate_up_exps_b == nullptr && !weight_before_ffn);
+    }
+    // the tensor whose buffer tells where this layer's experts live
+    const ggml_tensor * exps_where = factored ? layer_f->ffn_down_exps_f.u : down_exps;
+
     ggml_tensor * logits = nullptr;
 
     if (probs_in == nullptr) {
@@ -2589,7 +2619,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         selected_experts = build_inp_moe_ids(n_expert_used, n_tokens);
 
         // host experts: compute the ids on the device, as the router ids are, because the MoE cache and the expert copy read them there
-        if (down_exps->buffer && ggml_backend_buffer_is_host(down_exps->buffer)) {
+        if (exps_where->buffer && ggml_backend_buffer_is_host(exps_where->buffer)) {
             selected_experts = ggml_cont(ctx0, selected_experts);
         }
     }
@@ -2598,7 +2628,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     ggml_build_forward_expand(gf, cur);
 
     // the experts of host-resident layers may be read from the MoE cache (see llama_moe_cache::build_lookup)
-    const llama_moe_cache_lookup cache = moe_cache == nullptr ? llama_moe_cache_lookup{} :
+    // (binary-factor layers do not use the MoE cache yet)
+    const llama_moe_cache_lookup cache = moe_cache == nullptr || factored ? llama_moe_cache_lookup{} :
         moe_cache->build_lookup(*this, { il, up_exps, gate_exps, down_exps, gate_up_exps, weight_before_ffn }, selected_experts);
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
@@ -2615,9 +2646,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     auto build_experts = [&](ggml_tensor * cur, ggml_tensor * ids, ggml_tensor * mm_ids, bool cached) {
         ggml_tensor * up = nullptr;
 
-        if (gate_up_exps) {
-            // merged gate_up path: one mul_mat_id, then split into gate and up views
-            ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, ids, mm_ids, cached); // [n_ff*2, n_expert_used, n_tokens]
+        if (gate_up_exps || factored) {
+            // merged gate_up path: one mul_mat_id (two and the scales for binary factors), then split into gate and up views
+            ggml_tensor * gate_up = factored ?
+                build_factored_mm_id(layer_f->ffn_gate_up_exps_f, cur, ids, "ffn_moe_gate_up", il) :
+                build_lora_mm_id(gate_up_exps, cur, ids, mm_ids, cached); // [n_ff*2, n_expert_used, n_tokens]
             cb(gate_up, "ffn_moe_gate_up", il);
 
             if (gate_up_exps_b) {
@@ -2653,7 +2686,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             }
         }
 
-        const bool has_gate = gate_exps || gate_up_exps;
+        const bool has_gate = gate_exps || gate_up_exps || factored;
 
         switch (type_op) {
             case LLM_FFN_SILU:
@@ -2749,7 +2782,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             cur = amax_src1.res;
         }
 
-        ggml_tensor * experts = build_lora_mm_id(down_exps, cur, ids, mm_ids, cached); // [n_embd, n_expert_used, n_tokens]
+        ggml_tensor * experts = factored ?
+            build_factored_mm_id(layer_f->ffn_down_exps_f, cur, ids, "ffn_moe_down", il) :
+            build_lora_mm_id(down_exps, cur, ids, mm_ids, cached); // [n_embd, n_expert_used, n_tokens]
         //ggml_prec_set_src(experts, GGML_PREC_BF16, 1); // (see TODO above)
         cb(experts, "ffn_moe_down", il);
 

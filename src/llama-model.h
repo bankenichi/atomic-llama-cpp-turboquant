@@ -281,6 +281,20 @@ struct llama_layer_switch_lora {
     struct ggml_tensor * b_down = nullptr;
 };
 
+// one expert bank of moeq's binary-factor experts: per expert e, W_e = diag(s_post_e) * sign(U_e) * sign(V_e)^T * diag(s_pre_e)
+//   v      = sign(V)^T, S1_32 [n_in,  r,     n_expert]   (.weight)
+//   u      = sign(U),   S1_32 [r,     n_out, n_expert]   (.weight)
+//   s_pre  = F16 [n_in,  1, n_expert]                     (v's .scale)
+//   s_post = F16 [n_out, 1, n_expert]                     (u's .scale)
+struct llama_factor_bank {
+    struct ggml_tensor * v      = nullptr;
+    struct ggml_tensor * u      = nullptr;
+    struct ggml_tensor * s_pre  = nullptr;
+    struct ggml_tensor * s_post = nullptr;
+
+    bool present() const { return v != nullptr; }
+};
+
 struct llama_layer {
     // normalization
     struct ggml_tensor * attn_norm       = nullptr;
@@ -378,6 +392,10 @@ struct llama_layer {
     struct ggml_tensor * ffn_down_exps_b   = nullptr;
     struct ggml_tensor * ffn_up_exps_b     = nullptr;
     struct ggml_tensor * ffn_gate_up_exps_b = nullptr;
+
+    // ff MoE as binary factors (moeq): the fused gate+up bank and the down bank, used instead of the tensors above
+    struct llama_factor_bank ffn_gate_up_exps_f;
+    struct llama_factor_bank ffn_down_exps_f;
 
     // ff MoE per-expert scales (NVFP4 per-tensor scale2)
     struct ggml_tensor * ffn_gate_exps_s   = nullptr;
@@ -1154,6 +1172,12 @@ struct llama_model_base : public llama_model {
 
     // helper: try merged gate_up_exps first, fall back to separate gate and up
     void create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_,
+                int64_t n_ff_, int64_t n_expert_, int flags);
+
+    // helper: moeq binary-factor experts (a fused gate+up bank and a down bank); returns false and creates nothing when the
+    // file has none for this layer, so that the caller loads ordinary expert tensors instead. The ranks are read from the
+    // file; every other dimension is checked against n_embd_, n_ff_ and n_expert_.
+    bool create_tensor_factored_exps(llama_layer & layer, int bid, int64_t n_embd_,
                 int64_t n_ff_, int64_t n_expert_, int flags);
 
     // helper: try to load merged qkv first, fall back to separate q, k, v

@@ -21,6 +21,7 @@ struct ggml_tensor;
 
 struct llama_cparams;
 struct llama_layer;
+struct llama_factor_bank;
 struct llama_model;
 struct llama_prec_policy;
 struct llama_hadamard;
@@ -1304,6 +1305,15 @@ struct llm_graph_context {
               ggml_tensor * ids,
               ggml_tensor * slots  = nullptr,
                      bool   cached = true) const;
+
+    // one bank of moeq binary-factor experts (see llama-factored.h): s_post[e] * (sign(U_e) (sign(V_e)^T (s_pre[e] * cur)))
+    // cur: [n_in, 1 or n_expert_used, n_tokens], ids: [n_expert_used, n_tokens] -> [n_out, n_expert_used, n_tokens]
+    ggml_tensor * build_factored_mm_id(
+            const llama_factor_bank & bank,
+                    ggml_tensor * cur,
+                    ggml_tensor * ids,
+                     const char * name,
+                             int   il) const;
 
     // read rows of a token-embedding table; a Hadamard-latent table gets the
     // inverse transform so the result is in the primal basis
