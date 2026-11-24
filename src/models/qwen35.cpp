@@ -618,6 +618,12 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il,
             gdn_state_rows ? inp->s_copy_main : nullptr);
 
+    // the merged qkv+gate projection (attn_qkv_gate) leaves z a view with that projection's row stride; the gated
+    // norm's GLU needs contiguous rows, so a strided z is copied (with more than one token the view below is not)
+    if (!ggml_is_contiguous(z)) {
+        z = ggml_cont(ctx0, z);
+    }
+
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_view_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs,
             ggml_row_size(z->type, head_v_dim), z->nb[1], z->nb[1] * n_seq_tokens, 0);
