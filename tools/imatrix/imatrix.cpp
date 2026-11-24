@@ -5,12 +5,17 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <clocale>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
+#include <memory>
 #include <thread>
 #include <mutex>
 #include <vector>
@@ -58,6 +63,76 @@ struct tensor_statistics {
     float cossim       = 0.0f;
 };
 
+// Persistent worker threads for the collector: run(f) calls f(ith, nth) for ith in [0, nth) and returns when all are
+// done, f(0, nth) on the calling thread. Idle workers wait on a condition variable.
+class imatrix_thread_pool {
+public:
+    explicit imatrix_thread_pool(int n_threads) {
+        for (int i = 1; i < n_threads; ++i) {
+            m_workers.emplace_back([this, i] { work(i); });
+        }
+    }
+    ~imatrix_thread_pool() {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stop = true;
+        }
+        m_cv_work.notify_all();
+        for (auto & w : m_workers) {
+            w.join();
+        }
+    }
+    int size() const { return (int) m_workers.size() + 1; }
+    void run(const std::function<void(int, int)> & f) {
+        if (m_workers.empty()) {
+            f(0, 1);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_job     = &f;
+            m_pending = m_workers.size();
+            m_generation++;
+        }
+        m_cv_work.notify_all();
+        f(0, size());
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cv_done.wait(lock, [this] { return m_pending == 0; });
+        m_job = nullptr;
+    }
+private:
+    void work(int ith) {
+        uint64_t seen = 0;
+        while (true) {
+            const std::function<void(int, int)> * f;
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                m_cv_work.wait(lock, [&] { return m_stop || m_generation != seen; });
+                if (m_stop) {
+                    return;
+                }
+                seen = m_generation;
+                f    = m_job;
+            }
+            (*f)(ith, size());
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (--m_pending == 0) {
+                    m_cv_done.notify_one();
+                }
+            }
+        }
+    }
+    std::vector<std::thread>                  m_workers;
+    std::mutex                                m_mutex;
+    std::condition_variable                   m_cv_work;
+    std::condition_variable                   m_cv_done;
+    const std::function<void(int, int)>     * m_job        = nullptr;
+    size_t                                    m_pending    = 0;
+    uint64_t                                  m_generation = 0;
+    bool                                      m_stop       = false;
+};
+
 class IMatrixCollector {
 public:
     IMatrixCollector() = default;
@@ -76,6 +151,10 @@ private:
     int32_t                                m_last_chunk = 0;
     std::vector<char>                      m_src1_data;
     std::vector<char>                      m_ids; // the expert ids from ggml_mul_mat_id
+    std::vector<int64_t>                   m_expert_offs; // MUL_MAT_ID: the rows of expert ex are m_expert_rows[offs[ex], offs[ex+1])
+    std::vector<int64_t>                   m_expert_fill;
+    std::vector<size_t>                    m_expert_rows; // byte offsets of the src1 rows
+    std::unique_ptr<imatrix_thread_pool>   m_pool;
 };
 
 // remove any prefix and suffixes from the name
@@ -303,45 +382,105 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
             exit(1); //GGML_ABORT("fatal error");
         }
         LOG_DBGV(2, "%s[%d]: %32s, %s, %5d x %5d, %d\n", __func__, m_last_chunk, wname.c_str(), ggml_op_name(t->op), (int)src1->ne[0], (int)src1->ne[2], (int)src1->type);
-        // loop over all possible experts, regardless if they are used or not in the batch
+        // The rows each expert receives, in the order a scan over all experts visits them (slot-major, token-minor),
+        // found in one pass over the ids instead of one scan per expert. Every value below adds its rows in this order,
+        // one thread per value, so the result does not depend on the number of threads and equals the per-expert scan.
+        const int64_t ne0 = src1->ne[0];
+        m_expert_offs.assign(n_as + 1, 0);
+        for (int64_t idx = 0; idx < n_ids; ++idx) {
+            for (int64_t row = 0; row < src1->ne[2]; ++row) {
+                const int excur = *(const int32_t *) (m_ids.data() + row*ids->nb[1] + idx*ids->nb[0]);
+
+                GGML_ASSERT(excur >= 0 && excur < n_as); // sanity check
+
+                m_expert_offs[excur + 1]++;
+            }
+        }
         for (int64_t ex = 0; ex < n_as; ++ex) {
-            size_t e_start = ex*src1->ne[0];
+            m_expert_offs[ex + 1] += m_expert_offs[ex];
+        }
+        m_expert_fill.assign(m_expert_offs.begin(), m_expert_offs.end() - 1);
+        m_expert_rows.resize(m_expert_offs[n_as]);
+        for (int64_t idx = 0; idx < n_ids; ++idx) {
+            for (int64_t row = 0; row < src1->ne[2]; ++row) {
+                const int excur = *(const int32_t *) (m_ids.data() + row*ids->nb[1] + idx*ids->nb[0]);
 
-            for (int64_t idx = 0; idx < n_ids; ++idx) {
-                for (int64_t row = 0; row < src1->ne[2]; ++row) {
-                    const int excur = *(const int32_t *) (m_ids.data() + row*ids->nb[1] + idx*ids->nb[0]);
+                const int64_t i11 = idx % src1->ne[1];
+                const int64_t i12 = row;
+                m_expert_rows[m_expert_fill[excur]++] = i11*src1->nb[1] + i12*src1->nb[2];
+            }
+        }
 
-                    GGML_ASSERT(excur >= 0 && excur < n_as); // sanity check
+        if (!m_pool) {
+            m_pool = std::make_unique<imatrix_thread_pool>(std::max(1, m_params.cpuparams.n_threads));
+        }
 
-                    if (excur != ex) continue;
-
-                    const int64_t i11 = idx % src1->ne[1];
-                    const int64_t i12 = row;
-                    const float * x = (const float *)(data + i11*src1->nb[1] + i12*src1->nb[2]);
-
-                    e.counts[ex]++;
-
-                    for (int64_t j = 0; j < src1->ne[0]; ++j) {
-                        e.values[e_start + j] += x[j] * x[j];
-                        if (!std::isfinite((float)e.values[e_start + j])) {
-                            LOG_ERR("%f detected in %s\n", (float)e.values[e_start + j], wname.c_str());
-                            exit(1);
+        // add the squares of the rows of experts [ex_begin, ex_end) to their values, the columns split over the threads;
+        // stop at the first non-finite value in the order expert, row, column (the order of the per-expert scan)
+        auto accumulate = [&](int64_t ex_begin, int64_t ex_end) {
+            if (ex_begin >= ex_end) {
+                return;
+            }
+            struct non_finite { int64_t ex, r, j; float value; };
+            std::vector<non_finite> first(m_pool->size(), non_finite{ INT64_MAX, 0, 0, 0.0f });
+            m_pool->run([&](int ith, int nth) {
+                const int64_t per = ((ne0 + nth - 1)/nth + 15)/16*16; // multiples of 16 columns (64 bytes) per thread
+                const int64_t j0  = std::min(ne0, ith*per);
+                const int64_t j1  = std::min(ne0, j0 + per);
+                for (int64_t ex = ex_begin; ex < ex_end; ++ex) {
+                    float * values = e.values.data() + ex*ne0;
+                    for (int64_t r = m_expert_offs[ex]; r < m_expert_offs[ex + 1]; ++r) {
+                        const float * x = (const float *)(data + m_expert_rows[r]);
+                        int bad = 0;
+                        for (int64_t j = j0; j < j1; ++j) {
+                            values[j] += x[j] * x[j];
+                            bad |= !(std::fabs(values[j]) <= FLT_MAX); // NaN or infinite
+                        }
+                        if (bad) {
+                            for (int64_t j = j0; j < j1; ++j) {
+                                if (!std::isfinite(values[j])) {
+                                    first[ith] = non_finite{ ex, r, j, values[j] };
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
+            });
+            const auto bad = std::min_element(first.begin(), first.end(), [](const non_finite & a, const non_finite & b) {
+                return a.ex != b.ex ? a.ex < b.ex : a.r != b.r ? a.r < b.r : a.j < b.j;
+            });
+            if (bad->ex != INT64_MAX) {
+                LOG_ERR("%f detected in %s\n", bad->value, wname.c_str());
+                exit(1);
             }
+        };
+
+        // counts and chunk bookkeeping per expert in expert order, as in the per-expert scan; values are accumulated
+        // before any save, up to and including the current expert, so a save writes the same state as before
+        int64_t ex_done = 0;
+        for (int64_t ex = 0; ex < n_as; ++ex) {
+            e.counts[ex] += m_expert_offs[ex + 1] - m_expert_offs[ex];
+
             const int32_t n_chunk = e.counts[ex] / chunk_size;
             if (n_chunk > m_last_chunk) {
                 const int32_t chunk_step = n_chunk - m_last_chunk;
                 m_last_chunk = n_chunk;
-                if ((m_last_chunk % m_params.n_out_freq) / chunk_step == 0) {
+                const bool save_out = (m_last_chunk % m_params.n_out_freq) / chunk_step == 0;
+                const bool save_at  = m_params.n_save_freq > 0 && (m_last_chunk % m_params.n_save_freq) / chunk_step == 0;
+                if (save_out || save_at) {
+                    accumulate(ex_done, ex + 1);
+                    ex_done = ex + 1;
+                }
+                if (save_out) {
                     save_imatrix();
                 }
-                if (m_params.n_save_freq > 0 && (m_last_chunk % m_params.n_save_freq) / chunk_step == 0) {
+                if (save_at) {
                     save_imatrix(m_last_chunk);
                 }
             }
         }
+        accumulate(ex_done, n_as);
     } else {
         auto & e = m_stats[wname];
         const int64_t n_mat = src0->ne[2] * src0->ne[3];
@@ -378,11 +517,22 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
 
                 for (int64_t row = 0; row < src1->ne[1]; ++row) {
                     const float * x = (const float *) (data + row * src1->nb[1] + i2 * src1->nb[2] + i3 * src1->nb[3]);
+                    float * values = e.values.data() + mat_start;
                     for (int64_t j = 0; j < src1->ne[0]; ++j) {
-                        e.values[mat_start + j] += x[j] * x[j];
-                        if (!std::isfinite((float)e.values[j])) {
-                            LOG_ERR("%f detected in %s\n", (float)e.values[j], wname.c_str());
-                            exit(1);
+                        values[j] += x[j] * x[j];
+                    }
+                    // the same check as per element before (of e.values[j], which this row changes only for mat_start == 0),
+                    // once per row: a vectorizable test first, the exact search only if it finds a NaN or infinity
+                    int bad = 0;
+                    for (int64_t j = 0; j < src1->ne[0]; ++j) {
+                        bad |= !(std::fabs(e.values[j]) <= FLT_MAX);
+                    }
+                    if (bad) {
+                        for (int64_t j = 0; j < src1->ne[0]; ++j) {
+                            if (!std::isfinite((float)e.values[j])) {
+                                LOG_ERR("%f detected in %s\n", (float)e.values[j], wname.c_str());
+                                exit(1);
+                            }
                         }
                     }
                 }
