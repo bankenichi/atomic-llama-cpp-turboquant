@@ -889,6 +889,62 @@ static test_result test_y_shaped_graph(const std::vector<ggml_backend_t> & backe
     return ok;
 }
 
+// a graph that uses its capacity for both nodes and leafs (graph_size leafs, graph_size - 1 nodes): the scheduler hashes
+// every node and every leaf, so its hash set must hold more than graph_size tensors
+static test_result test_graph_nodes_and_leafs(ggml_backend_t cpu, size_t graph_size) {
+    ggml_backend_sched_ptr sched = create_test_scheduler({ cpu }, graph_size, /*use_device_host_buft =*/ false);
+
+    ggml_init_params params_leafs = {
+        /*.mem_size   =*/ graph_size*ggml_tensor_overhead(),
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr ctx_leafs(ggml_init(params_leafs));
+
+    std::vector<ggml_tensor *> leafs;
+    for (size_t i = 0; i < graph_size; i++) {
+        leafs.push_back(ggml_new_tensor_1d(ctx_leafs.get(), GGML_TYPE_F32, 1));
+    }
+    ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx_leafs.get(), cpu));
+    if (!buf) {
+        return fail("failed to allocate the leafs");
+    }
+    const float one = 1.0f;
+    for (ggml_tensor * leaf : leafs) {
+        ggml_backend_tensor_set(leaf, &one, 0, sizeof(one));
+    }
+
+    ggml_init_params params_compute = {
+        /*.mem_size   =*/ graph_size*ggml_tensor_overhead() + ggml_graph_overhead_custom(graph_size, false),
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr ctx_compute(ggml_init(params_compute));
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx_compute.get(), graph_size, /*grads =*/ false);
+    ggml_tensor * sum = leafs[0];
+    for (size_t i = 1; i < graph_size; i++) {
+        sum = ggml_add(ctx_compute.get(), sum, leafs[i]);
+    }
+    ggml_set_output(sum);
+    ggml_build_forward_expand(gf, sum);
+
+    ggml_backend_sched_reset(sched.get());
+    if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
+        return fail("failed to allocate the graph");
+    }
+    if (ggml_backend_sched_graph_compute(sched.get(), gf) != GGML_STATUS_SUCCESS) {
+        return fail("failed to compute the graph");
+    }
+
+    float result = 0.0f;
+    ggml_backend_tensor_get(sum, &result, 0, sizeof(result));
+    if (result != (float) graph_size) {
+        return fail("sum = %f, expected %f", result, (float) graph_size);
+    }
+    return TEST_OK;
+}
+
 static const char * dev_type_name(enum ggml_backend_dev_type type) {
     switch (type) {
         case GGML_BACKEND_DEVICE_TYPE_CPU:   return "CPU";
@@ -961,11 +1017,24 @@ int main(int argc, char ** argv) {
 
     ggml_backend_load_all();
 
+    // the CPU backend alone is enough for the size of the scheduler's hash set
+    {
+        ggml_backend_ptr cpu(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+        GGML_ASSERT(cpu != nullptr);
+        for (size_t graph_size : { 64, 1936 }) {
+            case_begin("test_graph_nodes_and_leafs graph_size = %4zu", graph_size);
+            case_end(test_graph_nodes_and_leafs(cpu.get(), graph_size));
+        }
+    }
+
     std::vector<ggml_backend_ptr> backends;
 
-    // nothing to test with synchronous CPU backend only
+    // nothing more to test with synchronous CPU backend only
     if (!initialize_backends(backends)) {
-        return 0;
+        if (print_log || n_ok + n_skip != n_test) {
+            printf("%d/%d tests passed\n", n_ok, n_test);
+        }
+        return n_ok + n_skip == n_test ? 0 : 1;
     }
 
     // the tests only borrow the backends, the ownership stays with this vector
