@@ -7,12 +7,16 @@
 #include "log.h"
 #include "speculative.h"
 
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <clocale>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -65,6 +69,76 @@ struct tensor_statistics {
     int64_t n_features = 0;
 };
 
+// Persistent worker threads for the collector: run(f) calls f(ith, nth) for ith in [0, nth) and returns when all are
+// done, f(0, nth) on the calling thread. Idle workers wait on a condition variable.
+class imatrix_thread_pool {
+public:
+    explicit imatrix_thread_pool(int n_threads) {
+        for (int i = 1; i < n_threads; ++i) {
+            m_workers.emplace_back([this, i] { work(i); });
+        }
+    }
+    ~imatrix_thread_pool() {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stop = true;
+        }
+        m_cv_work.notify_all();
+        for (auto & w : m_workers) {
+            w.join();
+        }
+    }
+    int size() const { return (int) m_workers.size() + 1; }
+    void run(const std::function<void(int, int)> & f) {
+        if (m_workers.empty()) {
+            f(0, 1);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_job     = &f;
+            m_pending = m_workers.size();
+            m_generation++;
+        }
+        m_cv_work.notify_all();
+        f(0, size());
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_cv_done.wait(lock, [this] { return m_pending == 0; });
+        m_job = nullptr;
+    }
+private:
+    void work(int ith) {
+        uint64_t seen = 0;
+        while (true) {
+            const std::function<void(int, int)> * f;
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                m_cv_work.wait(lock, [&] { return m_stop || m_generation != seen; });
+                if (m_stop) {
+                    return;
+                }
+                seen = m_generation;
+                f    = m_job;
+            }
+            (*f)(ith, size());
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (--m_pending == 0) {
+                    m_cv_done.notify_one();
+                }
+            }
+        }
+    }
+    std::vector<std::thread>                  m_workers;
+    std::mutex                                m_mutex;
+    std::condition_variable                   m_cv_work;
+    std::condition_variable                   m_cv_done;
+    const std::function<void(int, int)>     * m_job        = nullptr;
+    size_t                                    m_pending    = 0;
+    uint64_t                                  m_generation = 0;
+    bool                                      m_stop       = false;
+};
+
 class IMatrixCollector {
 public:
     IMatrixCollector() = default;
@@ -86,6 +160,10 @@ private:
     int32_t                                 m_n_layer_nextn = 0;
     std::vector<char>                       m_src1_data;
     std::vector<char>                       m_ids; // the expert ids from ggml_mul_mat_id
+    std::vector<int64_t>                    m_expert_offs; // MUL_MAT_ID: the rows of expert ex are m_expert_rows[offs[ex], offs[ex+1])
+    std::vector<int64_t>                    m_expert_fill;
+    std::vector<size_t>                     m_expert_rows; // byte offsets of the src1 rows
+    std::unique_ptr<imatrix_thread_pool>    m_pool;
     int32_t e_chunk_size() const {
         return m_chunk_size > 0 ? m_chunk_size : m_params.n_ctx / m_params.n_parallel;
     }
@@ -643,25 +721,55 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
         const int64_t n_tokens = src1->ne[2];
         const bool has_act = !e.activations.empty();
 
-        // single pass over the routing ids
+        // single pass over the routing ids: the rows of each expert, in the order of this pass (slot-major, token-minor)
         std::vector<uint8_t> touched(n_as, 0);
+        m_expert_offs.assign(n_as + 1, 0);
         for (int64_t idx = 0; idx < n_ids; ++idx) {
             for (int64_t row = 0; row < n_tokens; ++row) {
                 const int32_t ex = *(const int32_t *) (m_ids.data() + row * ids->nb[1] + idx * ids->nb[0]);
                 GGML_ASSERT(ex >= 0 && ex < n_as);  // sanity check
-                const int64_t i11 = idx % src1->ne[1];
-                const float * x = (const float *) (data + i11 * src1->nb[1] + row * src1->nb[2]);
-                float * acc = e.values.data() + ex * ne0;
-                float * act = has_act ? e.activations.data() + ex * ne0 : nullptr; // legacy imatrix tensors do not have activation sums
-
-                e.counts[ex]++;
-                touched[ex] = 1;
-                for (int64_t j = 0; j < ne0; ++j) { acc[j] += x[j] * x[j]; }
-                if (act) {
-                    for (int64_t j = 0; j < ne0; ++j) { act[j] += x[j]; }
-                }
+                m_expert_offs[ex + 1]++;
             }
         }
+        for (int64_t ex = 0; ex < n_as; ++ex) {
+            m_expert_offs[ex + 1] += m_expert_offs[ex];
+        }
+        m_expert_fill.assign(m_expert_offs.begin(), m_expert_offs.end() - 1);
+        m_expert_rows.resize(m_expert_offs[n_as]);
+        for (int64_t idx = 0; idx < n_ids; ++idx) {
+            for (int64_t row = 0; row < n_tokens; ++row) {
+                const int32_t ex = *(const int32_t *) (m_ids.data() + row * ids->nb[1] + idx * ids->nb[0]);
+                const int64_t i11 = idx % src1->ne[1];
+                m_expert_rows[m_expert_fill[ex]++] = i11 * src1->nb[1] + row * src1->nb[2];
+            }
+        }
+        for (int64_t ex = 0; ex < n_as; ++ex) {
+            e.counts[ex] += m_expert_offs[ex + 1] - m_expert_offs[ex];
+            touched[ex]   = m_expert_offs[ex + 1] > m_expert_offs[ex];
+        }
+
+        if (!m_pool) {
+            m_pool = std::make_unique<imatrix_thread_pool>(std::max(1, m_params.cpuparams.n_threads));
+        }
+
+        // every value adds its rows in the order above on one thread, the columns split over the threads,
+        // so the result does not depend on the number of threads
+        m_pool->run([&](int ith, int nth) {
+            const int64_t per = ((ne0 + nth - 1) / nth + 15) / 16 * 16; // multiples of 16 columns (64 bytes) per thread
+            const int64_t j0  = std::min(ne0, ith * per);
+            const int64_t j1  = std::min(ne0, j0 + per);
+            for (int64_t ex = 0; ex < n_as; ++ex) {
+                float * acc = e.values.data() + ex * ne0;
+                float * act = has_act ? e.activations.data() + ex * ne0 : nullptr; // legacy imatrix tensors do not have activation sums
+                for (int64_t r = m_expert_offs[ex]; r < m_expert_offs[ex + 1]; ++r) {
+                    const float * x = (const float *) (data + m_expert_rows[r]);
+                    for (int64_t j = j0; j < j1; ++j) { acc[j] += x[j] * x[j]; }
+                    if (act) {
+                        for (int64_t j = j0; j < j1; ++j) { act[j] += x[j]; }
+                    }
+                }
+            }
+        });
 
         // check for non-finite values, only checking experts that were routed to and touched
         for (int64_t ex = 0; ex < n_as; ++ex) {
