@@ -171,6 +171,7 @@ extern "C" {
         // the upstream range for the same reason as the private ggml types.
         LLAMA_FTYPE_MOSTLY_TQ3_1S        = 240, // WHT-rotated 3-bit weights
         LLAMA_FTYPE_MOSTLY_TQ4_1S        = 241, // WHT-rotated 4-bit weights
+        LLAMA_FTYPE_MOSTLY_S1_32_EXPS    = 245, // moeq binary-factor experts (S1_32 signs, F16 scales); the other tensors keep their own types
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };

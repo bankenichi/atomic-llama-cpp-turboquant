@@ -4351,6 +4351,21 @@ bool llama_model_base::create_tensor_factored_exps(llama_layer & layer, int bid,
     dn.s_pre  = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_V, "scale",  bid), { n_ff_,    1,        n_expert_ }, flags);
     dn.s_post = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS_U, "scale",  bid), { n_embd_,  1,        n_expert_ }, flags);
 
+    // the graph is written for these types only: sign factors S1_32, scales F16 or F32 (a sign tensor of another
+    // type would load and compute as an ordinary matrix, silently)
+    for (const llama_factor_bank * bank : { &gu, &dn }) {
+        for (const ggml_tensor * t : { bank->v, bank->u }) {
+            if (t && t->type != GGML_TYPE_S1_32) {
+                throw std::runtime_error(format("binary-factor tensor %s has type %s; it must be s1_32", t->name, ggml_type_name(t->type)));
+            }
+        }
+        for (const ggml_tensor * t : { bank->s_pre, bank->s_post }) {
+            if (t && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_F32) {
+                throw std::runtime_error(format("binary-factor scale %s has type %s; it must be f16 or f32", t->name, ggml_type_name(t->type)));
+            }
+        }
+    }
+
     return true;
 }
 
