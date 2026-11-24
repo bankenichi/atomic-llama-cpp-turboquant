@@ -13544,22 +13544,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_S1_32, GGML_TYPE_F32, 96, n, k, { 1, 1 }, { 1, 1 }));
         }
     }
-    // MUL_MAT_ID at the real bank shapes, sign(V)^T step (m = rank, k = width) then sign(U) step (m = width, k = rank):
-    // Granite-1B at 0.974 bpw (32 experts, 8 used: in-bank 1024 x 1024 at rank 480, out-bank 1024 x 512 at rank 320) and
-    // Qwen3.6-35B-A3B at the 0.67 target (256 experts, 8 used: in-bank 1024 x 2048 at rank 416, out-bank 2048 x 512 at 256)
+    // MUL_MAT_ID at the real bank shapes, sign(V)^T step (m = rank, k = width) then sign(U) step (m = width, k = rank),
+    // input per slot (b = false) as both steps have it:
+    //   Granite-1B at 0.974 bpw (32 experts, 8 used): in-bank 1024 x 1024 at rank 480, out-bank 1024 x 512 at rank 320
+    //   Granite-3B at 1.0 bpw (40 experts, 8 used): in-bank 1024 x 1536 at rank 576, out-bank 1536 x 512 at rank 352
+    //   OLMoE-1B-7B at 1.0 bpw (64 experts, 8 used): in-bank 2048 x 2048 at rank 992, out-bank 2048 x 1024 at rank 640
+    //   Qwen3.6-35B-A3B at the 0.67 target (256 experts, 8 used): in-bank 1024 x 2048 at rank 416, out-bank 2048 x 512 at 256
+    // K = 320, 352, 416, 480, 576, 992 are multiples of 32 but not of MMQ's 256-value step: their row tails are read past
+    // the row against zero-padded activations. Token counts: 1 and 8 (mat-vec, its MoE limit is 8), 9 and 24 (the
+    // few-row MMQ range), 512 (MMQ tiles, experts with no tokens).
     {
         struct factor_step { int n_mats; int n_used; int64_t m; int64_t k; };
         const factor_step steps[] = {
             {  32, 8,  480, 1024 }, {  32, 8, 1024,  480 }, {  32, 8,  320,  512 }, {  32, 8, 1024,  320 },
+            {  40, 8,  576, 1536 }, {  40, 8, 1024,  576 }, {  40, 8,  352,  512 }, {  40, 8, 1536,  352 },
+            {  64, 8,  992, 2048 }, {  64, 8, 2048,  992 }, {  64, 8,  640, 1024 }, {  64, 8, 2048,  640 },
             { 256, 8,  416, 2048 }, { 256, 8, 1024,  416 }, { 256, 8,  256,  512 }, { 256, 8, 2048,  256 },
         };
         for (const factor_step & s : steps) {
-            for (int n : { 1, 4, 8, 32, 512 }) {
+            for (int n : { 1, 4, 8, 9, 24, 32, 512 }) {
                 test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, s.n_mats, s.n_used, false, s.m, n, s.k));
             }
         }
+        // input broadcast to the slots (b = true), and ids that do not start the ids tensor (ids_offset)
         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, 32, 8, true, 480, 16, 1024));
+        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, 32, 8, false, 480, 9, 1024, 0, true));
+        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, 256, 8, false, 1024, 512, 416, 0, true));
         test_cases.emplace_back(new test_get_rows(GGML_TYPE_S1_32, 480, 64, 8, 1, 1, false));
+        test_cases.emplace_back(new test_get_rows(GGML_TYPE_S1_32, 992, 64, 8, 1, 1, false));
     }
 
     // ARC-LAB: ternary int8 coopmat GEMM path (Vulkan, GGML_VK_TERN_I8_MIN_N): rows % 128 == 0, several N incl. partial tiles
