@@ -1508,6 +1508,10 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
 
 // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
 void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    // the same check as in ggml_backend_sched_reserve and ggml_backend_sched_alloc_graph, which call this function:
+    // a graph whose nodes and leafs do not fit in the hash set would otherwise abort inside the hash insert
+    GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
+
     // reset splits
     sched->n_splits = 0;
     sched->n_graph_inputs = 0;
@@ -2589,8 +2593,9 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
 
     // initialize hash table
-    // FIXME: needs to be size*2 to account for leafs (do it in graph_split instead)
-    sched->hash_set    = ggml_hash_set_new(graph_size);
+    // every node and every leaf of a graph is hashed, and a graph of graph_size can hold graph_size nodes and graph_size leafs
+    // (cf. ggml_new_graph_custom, whose visited hash set has size*2 entries for the same reason)
+    sched->hash_set    = ggml_hash_set_new(2*graph_size);
     sched->hv_tensor_backend_ids   = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
     sched->hv_tensor_copies        = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
     sched->hv_tensor_requires_copy = (bool *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_requires_copy[0]));
