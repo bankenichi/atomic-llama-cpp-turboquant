@@ -137,7 +137,7 @@ static bool decode_window(llama_context * ctx, common_batch & batch, const llama
 
 static void usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s [-fa on|off|auto] [-dot q8|f32] -m MODEL.gguf [...] -m MODEL.gguf ... -f TEXT [-c 2048] "
-                         "[-t 8] [--chunks N] [--pairs 0-1,0-2,...] [-o OUT.json]\n"
+                         "[-t 8] [--chunks N] [--pairs 0-1,0-2,...] [--no-repack] [--dump-positions] [-o OUT.json]\n"
                          "  -fa and -dot apply to the models that follow them (defaults: auto, and the S1_32 path that\n"
                          "  GGML_S1_32_DOT selects); every pair (i < j) is compared as KL(model i || model j) unless\n"
                          "  --pairs lists the pairs\n", argv0);
@@ -147,6 +147,7 @@ struct pair_acc {
     int i = 0, j = 0;
     set_stats protocol, pos0, all;
     std::vector<double> window_protocol_mean;
+    std::vector<std::vector<float>> window_kld; // --dump-positions: every position of every window
     std::vector<float>  window_pos0;
     std::vector<double> pos_sum; // per position index, summed over windows
 };
@@ -160,6 +161,8 @@ int main(int argc, char ** argv) {
     std::vector<std::pair<int, int>> pair_list;
     std::string path_text, path_out;
     int n_ctx = 2048, n_threads = 8, n_chunks_max = -1;
+    bool repack = true;  // --no-repack: weights stay in the mapped file, so two models of one file share its pages
+    bool dump_positions = false;  // --dump-positions: the JSON also lists every position's KL of every window
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char * {
@@ -189,6 +192,8 @@ int main(int argc, char ** argv) {
         else if (a == "-c")       { n_ctx = std::atoi(next()); }
         else if (a == "-t")       { n_threads = std::atoi(next()); }
         else if (a == "--chunks") { n_chunks_max = std::atoi(next()); }
+        else if (a == "--no-repack") { repack = false; }
+        else if (a == "--dump-positions") { dump_positions = true; }
         else { usage(argv[0]); return 1; }
     }
     if (paths.size() < 2 || path_text.empty() || n_ctx < 4) {
@@ -203,6 +208,7 @@ int main(int argc, char ** argv) {
 
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = 0;
+    mp.use_extra_bufts = repack;
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx           = n_ctx;
     cp.n_batch         = n_ctx;
@@ -306,9 +312,15 @@ int main(int argc, char ** argv) {
                 t.join();
             }
             double wsum = 0.0;
+            if (dump_positions) {
+                pa.window_kld.emplace_back();
+            }
             for (int p = 0; p < n_ctx - 1; ++p) {
                 const pos_result & r = res[p];
                 pa.pos_sum[p] += r.kld;
+                if (dump_positions) {
+                    pa.window_kld.back().push_back(r.kld);
+                }
                 auto add = [&](set_stats & s) {
                     s.kld.push_back(r.kld);
                     s.same_top += r.same_top;
@@ -375,6 +387,16 @@ int main(int argc, char ** argv) {
             o << "],\n     \"window_pos0\": [";
             for (size_t i = 0; i < pa.window_pos0.size(); ++i) {
                 o << (i ? ", " : "") << pa.window_pos0[i];
+            }
+            if (dump_positions) {
+                o << "],\n     \"window_kld\": [";
+                for (size_t i = 0; i < pa.window_kld.size(); ++i) {
+                    o << (i ? ",\n       [" : "\n       [");
+                    for (size_t p = 0; p < pa.window_kld[i].size(); ++p) {
+                        o << (p ? ", " : "") << pa.window_kld[i][p];
+                    }
+                    o << "]";
+                }
             }
             o << "],\n     \"position_mean\": [";
             for (size_t i = 0; i < pa.pos_sum.size(); ++i) {
