@@ -27,6 +27,10 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q1_0_ref(x, y, k);
 }
 
+void quantize_row_s1_32(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_s1_32_ref(x, y, k);
+}
+
 void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q2_0_ref(x, y, k);
 }
@@ -140,6 +144,67 @@ void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRI
 }
 
 //===================================== Dot products =================================
+
+// S1_32 x Q8_0: per block of 32, the exact integer sum of +-q (bit 1 = +q, bit 0 = -q), times the activation
+// block's scale; the blocks are summed in float, in order.
+void ggml_vec_dot_s1_32_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int nb = n / QK_S1_32;
+
+    assert(n % QK_S1_32 == 0);
+    assert(QK_S1_32 == QK8_0); // S1_32 and Q8_0 blocks line up
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_s1_32 * GGML_RESTRICT x = vx;
+    const block_q8_0  * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint32_t bits = x[ib].qs;
+        int sumi = 0;
+        for (int j = 0; j < QK_S1_32; ++j) {
+            const int q = y[ib].qs[j];
+            sumi += ((bits >> j) & 1) ? q : -q;
+        }
+        sumf += GGML_CPU_FP16_TO_FP32(y[ib].d) * (float) sumi;
+    }
+
+    *s = sumf;
+}
+
+// S1_32 x F32, the float reference path (no activation quantization): per block of 32 the signed values are
+// summed in float, then the blocks in order.
+void ggml_vec_dot_s1_32_f32_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int nb = n / QK_S1_32;
+
+    assert(n % QK_S1_32 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_s1_32 * GGML_RESTRICT x = vx;
+    const float       * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint32_t bits = x[ib].qs;
+        const float * GGML_RESTRICT yb = y + (int64_t) ib*QK_S1_32;
+        float sumb = 0.0f;
+        for (int j = 0; j < QK_S1_32; ++j) {
+            sumb += ((bits >> j) & 1) ? yb[j] : -yb[j];
+        }
+        sumf += sumb;
+    }
+
+    *s = sumf;
+}
 
 void ggml_vec_dot_q1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK1_0;

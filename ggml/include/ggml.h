@@ -280,8 +280,9 @@ extern "C" {
         GGML_TYPE_TURBO4_0 = 242, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
         GGML_TYPE_TQ3_1S   = 243, // TurboQuant 3-bit weight: WHT-rotated Lloyd-Max
         GGML_TYPE_TQ4_1S   = 244, // TurboQuant 4-bit weight: WHT-rotated Lloyd-Max
+        GGML_TYPE_S1_32    = 245, // moeq binary-factor experts: 32 signs per uint32, bit 1 = +1, no scale (1 bpw)
 
-        GGML_TYPE_COUNT   = 245,
+        GGML_TYPE_COUNT   = 246,
     };
 
     // [TAG_GGML_PREC]

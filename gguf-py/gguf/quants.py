@@ -677,6 +677,18 @@ class Q1_0(__Quant, qtype=GGMLQuantizationType.Q1_0):
         return np.where(qs != 0, d, -d)
 
 
+class S1_32(__Quant, qtype=GGMLQuantizationType.S1_32):
+    # signs only: bit j of the block's little-endian uint32 is element j, 1 = +1 (x >= 0, also NaN), 0 = -1
+    @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        return np.packbits(~(blocks < 0), axis=-1, bitorder="little")
+
+    @classmethod
+    def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        bits = np.unpackbits(blocks, axis=-1, bitorder="little")
+        return np.where(bits != 0, np.float32(1), np.float32(-1))
+
+
 class Q2_0(__Quant, qtype=GGMLQuantizationType.Q2_0):
     @classmethod
     def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:

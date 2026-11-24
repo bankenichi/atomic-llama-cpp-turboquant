@@ -189,6 +189,15 @@ typedef struct {
 } block_q1_0;
 static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 block size/padding");
 
+// S1_32: pure signs, 32 per uint32 and nothing else (exactly 1 bit per weight). Bit j of qs (bit j%8 of byte
+// j/8) is the sign of element j: 1 means +1, 0 means -1, as in Q1_0. The value of an element is that sign; any
+// scale lives in separate tensors (moeq's binary-factor experts keep per-channel fp16 scales beside the signs).
+#define QK_S1_32 32
+typedef struct {
+    uint32_t qs; // 32 sign bits
+} block_s1_32;
+static_assert(sizeof(block_s1_32) == QK_S1_32 / 8, "wrong s1_32 block size/padding");
+
 #define QK2_0 64
 typedef struct {
     ggml_half d;              // delta (scale)

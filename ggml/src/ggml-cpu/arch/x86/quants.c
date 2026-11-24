@@ -1073,6 +1073,94 @@ void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
+// S1_32 x Q8_0: the per-32 inner loop of ggml_vec_dot_q1_0_q8_0 above without the weight scale. The int8
+// activations are negated where the sign bit is 0, summed exactly in int32 per block, and scaled by the block's d.
+void ggml_vec_dot_s1_32_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int nb = n / QK_S1_32;
+
+    assert(n % QK_S1_32 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_s1_32 * GGML_RESTRICT x = vx;
+    const block_q8_0  * GGML_RESTRICT y = vy;
+
+#if defined(__AVX2__)
+    const __m256i ones_8 = _mm256_set1_epi8(1);
+    const __m256i ones_16 = _mm256_set1_epi16(1);
+    const __m256i byte_shuf = _mm256_setr_epi8(
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+            2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
+    const __m256i bit_masks = _mm256_setr_epi8(
+            1, 2, 4, 8, 16, 32, 64, (char) -128, 1, 2, 4, 8, 16, 32, 64, (char) -128,
+            1, 2, 4, 8, 16, 32, 64, (char) -128, 1, 2, 4, 8, 16, 32, 64, (char) -128);
+    const __m256i zero = _mm256_setzero_si256();
+    __m256 acc = _mm256_setzero_ps();
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const __m256i qy = _mm256_loadu_si256((const __m256i *) y[ib].qs);
+        // 0xFF where the sign bit is 0 (weight -1), 0x00 where it is 1 (weight +1)
+        const __m256i sm = _mm256_cmpeq_epi8(
+                _mm256_and_si256(_mm256_shuffle_epi8(_mm256_set1_epi32((int) x[ib].qs), byte_shuf), bit_masks), zero);
+        const __m256i sy = _mm256_sub_epi8(_mm256_xor_si256(qy, sm), sm);
+        const __m256i s32 = _mm256_madd_epi16(_mm256_maddubs_epi16(ones_8, sy), ones_16);
+        acc = _mm256_fmadd_ps(_mm256_set1_ps(GGML_CPU_FP16_TO_FP32(y[ib].d)), _mm256_cvtepi32_ps(s32), acc);
+    }
+
+    *s = hsum_float_8(acc);
+#else
+    UNUSED(nb);
+    UNUSED(x);
+    UNUSED(y);
+    ggml_vec_dot_s1_32_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
+// S1_32 x F32, the float reference path: the sign bit selects +y or -y (an XOR of the float sign bit), summed in
+// float in four interleaved accumulators of eight lanes.
+void ggml_vec_dot_s1_32_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int nb = n / QK_S1_32;
+
+    assert(n % QK_S1_32 == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_s1_32 * GGML_RESTRICT x = vx;
+    const float       * GGML_RESTRICT y = vy;
+
+#if defined(__AVX2__)
+    const __m256i lane_bits = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const __m256i sign_bit  = _mm256_set1_epi32((int) 0x80000000u);
+    const __m256i zero      = _mm256_setzero_si256();
+    __m256 acc[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint32_t bits = x[ib].qs;
+        const float * GGML_RESTRICT yb = y + (int64_t) ib*QK_S1_32;
+        for (int g = 0; g < 4; ++g) {
+            const __m256i m = _mm256_and_si256(_mm256_set1_epi32((int) ((bits >> (8*g)) & 0xFF)), lane_bits);
+            // the float sign bit where the weight bit is 0 (weight -1)
+            const __m256i flip = _mm256_and_si256(_mm256_cmpeq_epi32(m, zero), sign_bit);
+            const __m256 v = _mm256_xor_ps(_mm256_loadu_ps(yb + 8*g), _mm256_castsi256_ps(flip));
+            acc[g] = _mm256_add_ps(acc[g], v);
+        }
+    }
+
+    *s = hsum_float_8(_mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3])));
+#else
+    UNUSED(nb);
+    UNUSED(x);
+    UNUSED(y);
+    ggml_vec_dot_s1_32_f32_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
 #if defined(__AVX2__) || defined(__AVX512F__)
 // four consecutive Q2_0 weights per byte: byte b becomes b & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3 (OR, never add: the overlapping copies only touch masked-off bits)
 static inline __m256i q2_0_unpack_32_avx2(const uint8_t * qs) {

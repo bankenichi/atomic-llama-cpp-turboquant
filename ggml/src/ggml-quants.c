@@ -497,6 +497,43 @@ void quantize_row_f8_e4m3_ref(const float * GGML_RESTRICT x, ggml_fp8_e4m3_t * G
     }
 }
 
+// S1_32: the sign of every element, no scale. x >= 0 (and +0, -0, NaN) store bit 1 (+1); x < 0 stores bit 0 (-1),
+// as quantize_row_q1_0_ref does. Signs are exact, so quantizing a dequantized row gives the same bits back.
+void quantize_row_s1_32_ref(const float * GGML_RESTRICT x, block_s1_32 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_S1_32 == 0);
+
+    const int64_t nb = k / QK_S1_32;
+
+    for (int64_t i = 0; i < nb; i++) {
+        uint32_t bits = 0;
+        for (int j = 0; j < QK_S1_32; ++j) {
+            if (!(x[i*QK_S1_32 + j] < 0.0f)) {
+                bits |= (uint32_t) 1 << j;
+            }
+        }
+        y[i].qs = bits;
+    }
+}
+
+void dequantize_row_s1_32(const block_s1_32 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_S1_32 == 0);
+
+    const int64_t nb = k / QK_S1_32;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const uint32_t bits = x[i].qs;
+        for (int j = 0; j < QK_S1_32; ++j) {
+            y[i*QK_S1_32 + j] = ((bits >> j) & 1) ? 1.0f : -1.0f;
+        }
+    }
+}
+
+size_t quantize_s1_32(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    GGML_UNUSED(quant_weights);
+    quantize_row_s1_32_ref(src, (block_s1_32 *) dst, nrow*n_per_row);
+    return nrow * ggml_row_size(GGML_TYPE_S1_32, n_per_row);
+}
+
 void dequantize_row_q1_0(const block_q1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK1_0;
 
@@ -6018,6 +6055,9 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_I32:
         case GGML_TYPE_I64:
             // nothing to validate
+            break;
+        case GGML_TYPE_S1_32:
+            // every bit pattern is a valid row of signs
             break;
         case GGML_TYPE_TQ3_1S:
         case GGML_TYPE_TQ4_1S:

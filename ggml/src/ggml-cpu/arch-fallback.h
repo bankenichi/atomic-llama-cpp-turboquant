@@ -5,6 +5,9 @@
 // This effectively selects the generic implementation.
 
 #if defined(GGML_CPU_GENERIC)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K
@@ -86,6 +89,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // quants.c
 #define ggml_vec_dot_pq2_0_q8_0_generic ggml_vec_dot_pq2_0_q8_0
 // repack.cpp
@@ -133,6 +139,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 
 #elif defined(__POWERPC__) || defined(__powerpc__)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K
@@ -195,6 +204,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__loongarch64)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K
@@ -257,6 +269,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__riscv)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K
@@ -312,6 +327,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__s390x__)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K
@@ -376,6 +394,9 @@
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__wasm__)
+// S1_32 (moeq sign factors): native dots on x86 only
+#define ggml_vec_dot_s1_32_q8_0_generic ggml_vec_dot_s1_32_q8_0
+#define ggml_vec_dot_s1_32_f32_generic ggml_vec_dot_s1_32_f32
 // PQ2_0 4x8 Q8_K repack (Arm NEON implementation only)
 #define ggml_gemv_pq2_0_4x8_q8_K_generic ggml_gemv_pq2_0_4x8_q8_K
 #define ggml_gemm_pq2_0_4x8_q8_K_generic ggml_gemm_pq2_0_4x8_q8_K

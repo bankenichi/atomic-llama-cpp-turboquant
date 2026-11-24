@@ -7424,6 +7424,7 @@ class GGMLQuantizationType(IntEnum):
     F8_E4M3 = 43
     PQ2_0   = 142
     PTQ1_0  = 143
+    S1_32   = 245  # fork-private: moeq binary-factor signs, 32 per uint32, bit 1 = +1, no scale
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -7681,6 +7682,7 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.F8_E4M3: (1, 1),
     GGMLQuantizationType.PQ2_0:   (128, 2 + 32),
     GGMLQuantizationType.PTQ1_0:  (128, 2 + 24 + 2),
+    GGMLQuantizationType.S1_32:   (32, 4),
 }
 
 

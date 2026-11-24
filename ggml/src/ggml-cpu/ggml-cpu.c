@@ -247,6 +247,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
+    [GGML_TYPE_S1_32] = {
+        .from_float               = quantize_row_s1_32,
+        .vec_dot                  = ggml_vec_dot_s1_32_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_Q1_0] = {
         .from_float               = quantize_row_q1_0,
         .vec_dot                  = ggml_vec_dot_q1_0_q8_0,
@@ -498,6 +504,11 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
 const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type) {
     return &type_traits_cpu[type];
 }
+
+// GGML_S1_32_DOT=f32 makes every S1_32 matrix product read its activations in F32 (ggml_vec_dot_s1_32_f32) instead of
+// quantizing them to Q8_0: the float reference path for checking a packed moeq model against its dense export.
+// Initialized once in ggml_cpu_init(), read-only afterwards.
+static bool ggml_cpu_s1_32_f32_dot = false;
 
 //
 // Threading defs
@@ -1281,12 +1292,18 @@ static inline enum ggml_type ggml_cpu_vec_dot_type(const struct ggml_tensor * sr
     if (ggml_cpu_pq2_needs_q8_0(src0)) {
         return GGML_TYPE_Q8_0;
     }
+    if (src0->type == GGML_TYPE_S1_32 && ggml_cpu_s1_32_f32_dot) {
+        return GGML_TYPE_F32;
+    }
     return type_traits_cpu[src0->type].vec_dot_type;
 }
 
 static inline ggml_vec_dot_t ggml_cpu_vec_dot(const struct ggml_tensor * src0) {
     if (ggml_cpu_pq2_needs_q8_0(src0)) {
         return ggml_vec_dot_pq2_0_q8_0;
+    }
+    if (src0->type == GGML_TYPE_S1_32 && ggml_cpu_s1_32_f32_dot) {
+        return ggml_vec_dot_s1_32_f32;
     }
     return type_traits_cpu[src0->type].vec_dot;
 }
@@ -4170,6 +4187,14 @@ void ggml_cpu_init(void) {
         {
             const char * env = getenv("GGML_CPU_DISABLE_FUSION");
             ggml_cpu_disable_fusion = (env != NULL && atoi(env) == 1);
+        }
+
+        {
+            const char * env = getenv("GGML_S1_32_DOT");
+            ggml_cpu_s1_32_f32_dot = (env != NULL && strcmp(env, "f32") == 0);
+            if (ggml_cpu_s1_32_f32_dot) {
+                GGML_LOG_INFO("%s: GGML_S1_32_DOT=f32: S1_32 matrix products use F32 activations (float reference path)\n", __func__);
+            }
         }
 
         is_first_call = false;
