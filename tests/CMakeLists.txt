@@ -284,6 +284,20 @@ set_tests_properties(test-generate-models PROPERTIES
     FIXTURES_SETUP generate-models
 )
 
+# moeq binary-factor experts at the model level: test-llama-archs' qwen35 (dense), qwen35moe and olmoe models rewritten
+# into dense and packed (S1_32) files, loaded, logits compared on the CPU, the loader's refusals checked
+set(FACTORED_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models-factored")
+file(MAKE_DIRECTORY "${FACTORED_MODEL_DIR}")
+llama_test(
+    test-llama-archs
+    NAME test-generate-factored-models
+    LABEL behavior
+    ARGS -a "^(qwen35|qwen35moe|olmoe)$" -o "${FACTORED_MODEL_DIR}"
+)
+set_tests_properties(test-generate-factored-models PROPERTIES FIXTURES_SETUP factored-models)
+llama_build_and_test(test-factored-model.cpp LABEL behavior ARGS "${FACTORED_MODEL_DIR}")
+set_tests_properties(test-factored-model PROPERTIES FIXTURES_REQUIRED factored-models)
+
 # Target model for test-speculative-rejection-sampling
 set(SPEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-speculative-models/target")
 file(MAKE_DIRECTORY "${SPEC_TARGET_DIR}")
