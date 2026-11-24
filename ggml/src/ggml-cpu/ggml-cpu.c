@@ -507,7 +507,7 @@ const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type
 
 // GGML_S1_32_DOT=f32 makes every S1_32 matrix product read its activations in F32 (ggml_vec_dot_s1_32_f32) instead of
 // quantizing them to Q8_0: the float reference path for checking a packed moeq model against its dense export.
-// Initialized once in ggml_cpu_init(), read-only afterwards.
+// Set from the environment in ggml_cpu_init(); ggml_cpu_set_s1_32_dot_f32() may change it between graph computations.
 static bool ggml_cpu_s1_32_f32_dot = false;
 
 //
@@ -4115,6 +4115,16 @@ int ggml_cpu_has_sme2(void) {
 #endif
 }
 
+void ggml_cpu_set_s1_32_dot_f32(bool enable) {
+    ggml_cpu_init(); // reads GGML_S1_32_DOT on its first call; the value set here overrides it
+    ggml_cpu_s1_32_f32_dot = enable;
+}
+
+bool ggml_cpu_get_s1_32_dot_f32(void) {
+    ggml_cpu_init();
+    return ggml_cpu_s1_32_f32_dot;
+}
+
 void ggml_cpu_init(void) {
     // needed to initialize ggml_time
     {
@@ -4193,7 +4203,7 @@ void ggml_cpu_init(void) {
             const char * env = getenv("GGML_S1_32_DOT");
             ggml_cpu_s1_32_f32_dot = (env != NULL && strcmp(env, "f32") == 0);
             if (ggml_cpu_s1_32_f32_dot) {
-                GGML_LOG_INFO("%s: GGML_S1_32_DOT=f32: S1_32 matrix products use F32 activations (float reference path)\n", __func__);
+                GGML_LOG_WARN("%s: GGML_S1_32_DOT=f32: S1_32 matrix products use F32 activations (float reference path)\n", __func__);
             }
         }
 

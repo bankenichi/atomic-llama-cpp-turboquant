@@ -125,6 +125,11 @@ extern "C" {
 
     GGML_BACKEND_API void ggml_cpu_init(void);
 
+    // S1_32 (moeq sign factors) matrix products: F32 activations (the float reference path) instead of Q8_0.
+    // GGML_S1_32_DOT=f32 sets it at init; this changes it afterwards, between graph computations only.
+    GGML_BACKEND_API void ggml_cpu_set_s1_32_dot_f32(bool enable);
+    GGML_BACKEND_API bool ggml_cpu_get_s1_32_dot_f32(void);
+
     //
     // CPU backend
     //

@@ -188,6 +188,15 @@ int main(int argc, char ** argv) {
     for (const bank_case & c : cases) {
         failed += run_case(c, f32, rng);
     }
+    // the other path, switched in-process between graph computations (ggml_cpu_set_s1_32_dot_f32), then back
+    if (ggml_cpu_get_s1_32_dot_f32() != f32) {
+        std::printf("ggml_cpu_get_s1_32_dot_f32() does not report the path GGML_S1_32_DOT selected\n");
+        failed++;
+    }
+    ggml_cpu_set_s1_32_dot_f32(!f32);
+    failed += run_case(cases[2], !f32, rng);
+    ggml_cpu_set_s1_32_dot_f32(f32);
+    failed += run_case(cases[2], f32, rng);
     std::printf("test-factored-experts (%s): %s\n", f32 ? "f32" : "q8", failed == 0 ? "all cases passed" : "FAILED");
     return failed == 0 ? 0 : 1;
 }
