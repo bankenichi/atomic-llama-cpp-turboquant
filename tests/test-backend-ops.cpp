@@ -8373,6 +8373,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // IQ1_M batched matmuls (IQ1_S alongside as the reference): more than 8 columns, row counts with and without the
+    // MMQ bounds check (nrows % 128 != 0), several 256-value blocks per row, and the Granite-3.1-1B-A400M expert
+    // shapes (32 experts, 8 used; gate/up 1024 -> 512 with broadcast activations, down 512 -> 1024).
+    for (ggml_type type_a : {GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M}) {
+        for (int m : {128, 200}) {
+            for (int n : {9, 16, 37, 64, 129, 512}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, m, n, 1024, {1, 1}, {1, 1}));
+            }
+        }
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 128, 33, 512, {2, 3}, {1, 1}));
+        for (int n : {9, 33, 129, 512}) {
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32, 8, true,   512, n, 1024));
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32, 8, false, 1024, n,  512));
+        }
+    }
+
     for (int bs : {1, 4, 512}) {
         for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K}) {
             for (ggml_type type_b : {GGML_TYPE_F32}) {
@@ -9106,6 +9122,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_b : {GGML_TYPE_F32}) {
                 test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 32, 4, false, 2880, bs, 2880));
                 test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 32, 4, false, 2880, bs, 2880, 1));
+            }
+        }
+    }
+
+    // IQ1_S, IQ1_M and IQ2_XXS experts of Granite-3.1-1B-A400M (32 experts, hidden 1024) and Granite-3.1-3B-A800M
+    // (40 experts, hidden 1536): 8 used, expert width 512; gate/up with broadcast activations, then down.
+    for (int bs : {1, 8, 9, 32, 128, 512}) {
+        for (ggml_type type_a : {GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M, GGML_TYPE_IQ2_XXS}) {
+            for (auto [n_mats, n_embd] : {std::pair{32, 1024}, std::pair{40, 1536}}) {
+                test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, n_mats, 8, true,     512, bs, n_embd));
+                test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, n_mats, 8, false, n_embd, bs,    512));
             }
         }
     }
