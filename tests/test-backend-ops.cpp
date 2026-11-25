@@ -7218,11 +7218,12 @@ struct test_mul_gathered_rows : public test_case {
     const int64_t n, E, U, T;
     const bool bcast;   // activations broadcast over the slots ([n, 1, T])
     const bool swap;    // gathered rows as the MUL's first operand
+    const bool deferred; // another node between the gather and its MUL (CUDA skips the gather, the MUL computes it)
     std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "MUL_GATHERED_ROWS"; }
-    std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap); }
+    std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap) + ",deferred=" + std::to_string(deferred); }
     bool run_whole_graph() override { return true; }
-    test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap)
-        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap) {}
+    test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap, bool deferred = false)
+        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap), deferred(deferred) {}
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * table = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n, E);
         ggml_set_name(table, "table");
@@ -7232,6 +7233,9 @@ struct test_mul_gathered_rows : public test_case {
         ggml_set_name(a, "a");
         ggml_tensor * g = ggml_get_rows(ctx, table, ids);
         ggml_tensor * r = ggml_reshape_3d(ctx, g, n, U, T);
+        if (deferred) {
+            a = ggml_scale(ctx, a, 0.5f);   // built after the gather: the graph runs it between the gather and the MUL
+        }
         ggml_tensor * out = swap ? ggml_mul(ctx, r, a) : ggml_mul(ctx, a, r);
         ggml_set_name(out, "out");
         return out;
@@ -13645,6 +13649,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, false, true));
         }
         test_cases.emplace_back(new test_mul_gathered_rows(2048, 256, 8, 64, true, false));
+        for (int64_t T : { 1, 9, 512 }) {
+            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true, true));
+            test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, true, true));
+        }
         const factor_step large_steps[] = { { 32, 8, 480, 1024 }, { 32, 8, 1024, 480 }, { 256, 8, 2048, 256 } };
         for (const factor_step & s : large_steps) {
             for (int n : { 1, 8, 9, 16, 32, 64, 128, 129, 512 }) {

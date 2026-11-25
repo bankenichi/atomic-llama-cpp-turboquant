@@ -5683,9 +5683,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return 0;
     }
 
-    // moeq binary-factor scales: GET_ROWS (F16 table by expert ids) -> RESHAPE -> MUL in one kernel (bit-identical)
-    if (cgraph->nodes[i]->op == GGML_OP_GET_ROWS && ggml_cuda_try_fuse_mul_gathered(*cuda_ctx, cgraph, i)) {
-        return 2;
+    // moeq binary-factor scales: GET_ROWS (F16 table by expert ids) -> RESHAPE -> MUL in one kernel (bit-identical);
+    // -1: this node is handled and nothing else is skipped (mul-gathered.cuh)
+    if (cgraph->nodes[i]->op == GGML_OP_GET_ROWS || cgraph->nodes[i]->op == GGML_OP_MUL) {
+        const int r = ggml_cuda_try_fuse_mul_gathered(*cuda_ctx, cgraph, i);
+        if (r != 0) {
+            return r;
+        }
     }
     static const bool dual_rms_q8_enabled = [] {
         const char * env = getenv("GGML_CUDA_GB10_DUAL_RMS_Q8");
@@ -7351,6 +7355,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
+                if (nodes_to_skip < 0) {
+                    continue; // node i handled, nothing else skipped
+                }
                 if (nodes_to_skip != 0) {
 #ifdef GGML_CUDA_DEBUG
                     const int last_fused = i + nodes_to_skip;
