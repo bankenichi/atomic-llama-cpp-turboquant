@@ -13682,6 +13682,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_mul_mat_large(GGML_TYPE_S1_32, 96, n, k, 2000.0f));
             }
         }
+        // and every other odd K of the four models' banks (review of stage 2, finding 5): 320, 352, 416, 576, 992
+        const factor_step large_odd_k[] = {
+            { 32, 8, 1024, 320 }, { 40, 8, 1536, 352 }, { 256, 8, 1024, 416 }, { 40, 8, 1024, 576 }, { 64, 8, 2048, 992 },
+        };
+        for (const factor_step & s : large_odd_k) {
+            for (int n : { 1, 8, 9, 24, 32, 64, 512 }) {
+                test_cases.emplace_back(new test_mul_mat_id_large(GGML_TYPE_S1_32, s.n_mats, s.n_used, s.m, n, s.k, 2000.0f));
+            }
+        }
         const factor_step large_steps[] = { { 32, 8, 480, 1024 }, { 32, 8, 1024, 480 }, { 256, 8, 2048, 256 } };
         for (const factor_step & s : large_steps) {
             for (int n : { 1, 8, 9, 16, 32, 64, 128, 129, 512 }) {

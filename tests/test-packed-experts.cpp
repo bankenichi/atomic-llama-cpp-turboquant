@@ -120,6 +120,7 @@ enum class variant {
     packed,         // the eight factored tensors per layer
     bad_sign_type,  // layer 0's gate_up V stored as F16 instead of S1_32
     one_bank,       // layer 1 without its down bank's factored tensors
+    bad_scale_type, // layer 0's gate_up s_pre stored as BF16 (scales must be F16 or F32)
     rank_mismatch,  // layer 0's gate_up U written with a rank other than V's
 };
 
@@ -227,7 +228,13 @@ static void write_model(const std::string & path, const model_weights & m, varia
         } else {
             w.s1_32(blk(il, "ffn_gate_up_exps_v.weight"), { gu.n_in, gu.r, N_EXPERT }, gu.vt);
         }
-        w.f16(blk(il, "ffn_gate_up_exps_v.scale"), { gu.n_in, 1, N_EXPERT }, gu.sp);
+        if (var == variant::bad_scale_type && il == 0) {
+            w.add(blk(il, "ffn_gate_up_exps_v.scale"), GGML_TYPE_BF16, { gu.n_in, 1, N_EXPERT }, [&](ggml_tensor * t) {
+                ggml_fp32_to_bf16_row(gu.sp.data(), (ggml_bf16_t *) t->data, ggml_nelements(t));
+            });
+        } else {
+            w.f16(blk(il, "ffn_gate_up_exps_v.scale"), { gu.n_in, 1, N_EXPERT }, gu.sp);
+        }
         if (var == variant::rank_mismatch && il == 0) {
             std::vector<float> uu((size_t) N_EXPERT*gu.n_out*(gu.r - 32), 1.0f);
             w.s1_32(blk(il, "ffn_gate_up_exps_u.weight"), { gu.r - 32, gu.n_out, N_EXPERT }, uu);
@@ -329,6 +336,7 @@ int main() {
     write_model(path("dense.gguf"), mw, variant::dense);
     write_model(path("packed.gguf"), mw, variant::packed);
     write_model(path("bad_sign_type.gguf"), mw, variant::bad_sign_type);
+    write_model(path("bad_scale_type.gguf"), mw, variant::bad_scale_type);
     write_model(path("one_bank.gguf"), mw, variant::one_bank);
     write_model(path("rank_mismatch.gguf"), mw, variant::rank_mismatch);
 
@@ -370,6 +378,7 @@ int main() {
     // the loader's refusals
     const struct { const char * file; const char * what; } refusals[] = {
         { "bad_sign_type.gguf", "refuses a sign tensor stored as F16" },
+        { "bad_scale_type.gguf", "refuses a scale stored as BF16" },
         { "one_bank.gguf",      "refuses a layer with only one factored bank" },
         { "rank_mismatch.gguf", "refuses a U whose rank differs from V's" },
     };
