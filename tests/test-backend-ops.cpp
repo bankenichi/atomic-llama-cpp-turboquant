@@ -7187,6 +7187,31 @@ struct test_mul_mat_id : public test_case {
     }
 };
 
+// MUL_MAT_ID with large activations, as real models produce them: values of about `act` and one massive channel
+// (element 3 of every row, 50*act, the sign alternating by row). For sign weights (S1_32) the sums then carry the
+// activations' full magnitude: with act = 2000 they reach about 1e5 and beyond, far past F16's 65504, so a route that
+// accumulates or stores in half precision shows up as inf/NaN instead of hiding behind small random inputs.
+struct test_mul_mat_id_large : public test_mul_mat_id {
+    const float act;
+    test_mul_mat_id_large(ggml_type type_a, int n_mats, int n_used, int64_t m, int64_t n, int64_t k, float act)
+        : test_mul_mat_id(type_a, GGML_TYPE_F32, n_mats, n_used, false, m, n, k), act(act) {}
+    std::string vars() override { return test_mul_mat_id::vars() + ",act=" + std::to_string((int) act); }
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat_id::initialize_tensors(ctx);
+        ggml_tensor * b = ggml_get_tensor(ctx, "b");
+        GGML_ASSERT(b && b->type == GGML_TYPE_F32);
+        std::mt19937 rng(4321);
+        std::normal_distribution<float> nd(0.0f, act);
+        const int64_t nrows = ggml_nrows(b);
+        std::vector<float> row(b->ne[0]);
+        for (int64_t r = 0; r < nrows; ++r) {
+            for (float & v : row) { v = nd(rng); }
+            row[std::min<int64_t>(3, b->ne[0] - 1)] = (r % 2 ? -50.0f : 50.0f)*act;
+            ggml_backend_tensor_set(b, row.data(), r*b->nb[1], b->ne[0]*sizeof(float));
+        }
+    }
+};
+
 // MUL_MAT_ID with expert ids repeated within a token's row
 struct test_mul_mat_id_dup : public test_mul_mat_id {
     using test_mul_mat_id::test_mul_mat_id;
@@ -13572,6 +13597,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_S1_32, GGML_TYPE_F32, 256, 8, false, 1024, 512, 416, 0, true));
         test_cases.emplace_back(new test_get_rows(GGML_TYPE_S1_32, 480, 64, 8, 1, 1, false));
         test_cases.emplace_back(new test_get_rows(GGML_TYPE_S1_32, 992, 64, 8, 1, 1, false));
+        // large activations at every dispatch boundary: mat-vec up to 8 tokens, the tiled kernel from 9, its column
+        // tiles (16..128) and the next tile (129), 512; both products of Granite-1B's in-bank and Qwen3.6's out-bank
+        // (the stage-2 F16 GEMM overflow passed every small-input case above)
+        const factor_step large_steps[] = { { 32, 8, 480, 1024 }, { 32, 8, 1024, 480 }, { 256, 8, 2048, 256 } };
+        for (const factor_step & s : large_steps) {
+            for (int n : { 1, 8, 9, 16, 32, 64, 128, 129, 512 }) {
+                test_cases.emplace_back(new test_mul_mat_id_large(GGML_TYPE_S1_32, s.n_mats, s.n_used, s.m, n, s.k, 2000.0f));
+            }
+        }
     }
 
     // ARC-LAB: ternary int8 coopmat GEMM path (Vulkan, GGML_VK_TERN_I8_MIN_N): rows % 128 == 0, several N incl. partial tiles

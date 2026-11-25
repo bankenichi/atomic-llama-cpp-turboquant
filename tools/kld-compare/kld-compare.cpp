@@ -230,9 +230,14 @@ static bool capture_cb(ggml_tensor * t, bool ask, void * user_data) {
 struct capture_acc {
     std::vector<float> nmse, maxrel, layer0;
     double matched = 0.0, rows = 0.0;   // rows whose expert agrees in both models, of all rows
+    double maxabs = 0.0;                // the largest |value| of the reference model's tensor (all rows)
+    std::string maxabs_at;
     std::string worst;
     float worst_nmse = -1.0f;
 };
+
+// tokens per captured window (--capture-detail reports token 0's slice separately)
+static size_t g_capture_tokens = 0;
 
 // The expert tensors of a MoE layer are [n, n_used, n_tokens]: row (slot k, token t) belongs to the k-th most
 // probable expert of token t. When the two models' routers order two near-equal experts differently, or choose
@@ -241,7 +246,7 @@ struct capture_acc {
 static bool compare_captured(const std::string & name, const std::vector<float> & a, const std::vector<float> & b,
                              const std::map<std::string, std::vector<float>> & ta,
                              const std::map<std::string, std::vector<float>> & tb, int window,
-                             std::map<std::string, capture_acc> & out) {
+                             std::map<std::string, capture_acc> & out, std::vector<std::string> * detail = nullptr) {
     const size_t dash = name.rfind('-');
     const std::string kind = dash == std::string::npos ? name : name.substr(0, dash);
     const std::string layer = dash == std::string::npos ? "" : name.substr(dash + 1);
@@ -260,7 +265,8 @@ static bool compare_captured(const std::string & name, const std::vector<float> 
             keep[r] = std::memcmp(&ia->second[r], &ib->second[r], sizeof(float)) == 0;
         }
     }
-    double num = 0.0, den = 0.0, maxd = 0.0, maxa = 0.0;
+    double num = 0.0, den = 0.0, maxd = 0.0, maxa = 0.0, num0 = 0.0, den0 = 0.0;
+    const size_t tok0_end = g_capture_tokens > 0 && a.size() % g_capture_tokens == 0 ? a.size()/g_capture_tokens : 0;
     size_t n_keep = 0;
     for (size_t r = 0; r < n_rows; ++r) {
         if (!keep[r]) {
@@ -271,13 +277,33 @@ static bool compare_captured(const std::string & name, const std::vector<float> 
             const double d = (double) b[q] - a[q];
             num += d*d;
             den += (double) a[q]*a[q];
+            if (q < tok0_end) {
+                num0 += d*d;
+                den0 += (double) a[q]*a[q];
+            }
             maxd = std::max(maxd, std::fabs(d));
             maxa = std::max(maxa, std::fabs((double) a[q]));
         }
     }
     capture_acc & acc = out[kind];
+    double maxabs_t = 0.0;
+    for (float v : a) {
+        maxabs_t = std::max(maxabs_t, std::fabs((double) v));
+        if (std::fabs((double) v) > acc.maxabs) {
+            acc.maxabs    = std::fabs((double) v);
+            acc.maxabs_at = name + " window " + std::to_string(window);
+        }
+    }
     acc.rows += n_rows;
     acc.matched += n_keep;
+    if (detail) {
+        std::ostringstream d;
+        d << "{\"tensor\": " << json_str(name) << ", \"window\": " << window << ", \"nmse\": "
+          << json_num(n_keep ? (den > 0 ? num/den : num) : NAN) << ", \"rows_matched\": " << json_num(double(n_keep)/n_rows)
+          << ", \"maxabs_ref\": " << json_num(maxabs_t) << ", \"nmse_token0\": "
+          << json_num(tok0_end && den0 > 0 ? num0/den0 : NAN) << "}";
+        detail->push_back(d.str());
+    }
     if (n_keep == 0) {
         return true;
     }
@@ -312,6 +338,7 @@ struct pair_acc {
     std::vector<double> pos_sum; // per position index, summed over windows
     std::vector<float>  pos_max; // per position index, the largest over windows
     std::map<std::string, capture_acc> captures;
+    std::vector<std::string> capture_detail;   // --capture-detail: every tensor of every captured window
 };
 
 struct model_spec {
@@ -342,6 +369,8 @@ int main(int argc, char ** argv) {
     std::vector<std::pair<int, int>> pair_list;
     std::string path_text, path_out, capture_re;
     int n_ctx = 2048, n_threads = 8, n_chunks_max = -1, n_positions = -1, n_head = 64, capture_windows = 4;
+    std::vector<int> window_list;   // --windows: decode only these windows (and capture all of them)
+    bool capture_detail = false;
     bool no_middle = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -380,6 +409,12 @@ int main(int argc, char ** argv) {
         else if (a == "--no-middle")       { no_middle = true; }
         else if (a == "--capture")         { capture_re = next(); }
         else if (a == "--capture-windows") { capture_windows = std::atoi(next()); }
+        else if (a == "--capture-detail")  { capture_detail = true; }
+        else if (a == "--windows") {
+            std::stringstream ws(next());
+            std::string item;
+            while (std::getline(ws, item, ',')) { window_list.push_back(std::atoi(item.c_str())); }
+        }
         else { usage(argv[0]); return 1; }
     }
     if (specs.size() < 2 || path_text.empty() || n_ctx < 4 || ubatch < 1) {
@@ -474,6 +509,7 @@ int main(int argc, char ** argv) {
     const bool add_bos = llama_vocab_get_add_bos(vocab);
     const int first = n_ctx/2;
     auto compared = [&](int p) { return !no_middle || p < n_head || p >= first; };
+    g_capture_tokens = n_eval;
     std::printf("%zu tokens, %d windows of %d, add_bos %d, %d tokens decoded per window, positions 0..%d compared "
                 "(protocol %d..%d, head 0..%d), %zu models\n", tokens.size(), n_chunks, n_ctx, (int) add_bos, n_eval,
                 n_cmp - 1, first, n_ctx - 2, n_head - 1, n_models);
@@ -514,11 +550,14 @@ int main(int argc, char ** argv) {
     std::vector<pos_result> res(n_cmp);
 
     for (int w = 0; w < n_chunks; ++w) {
+        if (!window_list.empty() && std::find(window_list.begin(), window_list.end(), w) == window_list.end()) {
+            continue;
+        }
         std::vector<llama_token> win(tokens.begin() + size_t(w)*n_ctx, tokens.begin() + size_t(w + 1)*n_ctx);
         if (add_bos) {
             win[0] = llama_vocab_bos(vocab);
         }
-        const bool capturing = !capture_re.empty() && w < capture_windows;
+        const bool capturing = !capture_re.empty() && (window_list.empty() ? w < capture_windows : true);
         for (size_t m = 0; m < n_models; ++m) {
             set_mode(specs[m].dot < 0 ? env_mode : specs[m].dot);
             captures[m].active = capturing;
@@ -588,7 +627,8 @@ int main(int argc, char ** argv) {
                 for (const auto & kv : ta) {
                     auto it = tb.find(kv.first);
                     if (it != tb.end()) {
-                        compare_captured(kv.first, kv.second, it->second, ta, tb, w, pa.captures);
+                        compare_captured(kv.first, kv.second, it->second, ta, tb, w, pa.captures,
+                                         capture_detail ? &pa.capture_detail : nullptr);
                     }
                 }
             }
@@ -652,8 +692,10 @@ int main(int argc, char ** argv) {
             std::printf("  tensor %-22s n %4zu  rows matched %.4f  nmse median %.3e max %.3e  layer 0 median %.3e  "
                         "max|d|/max|a| median %.3e max %.3e  worst %s\n", kv.first.c_str(), e.size(), matched,
                         percentile(e, 0.5f), e.back(), percentile(l0, 0.5f), percentile(mr, 0.5f), mr.back(), acc.worst.c_str());
+            std::printf("  tensor %-22s largest |value| of the reference %.4g at %s\n", kv.first.c_str(), acc.maxabs, acc.maxabs_at.c_str());
             std::ostringstream c;
-            c << "{\"kind\": \"" << kv.first << "\", \"n\": " << e.size() << ", \"rows_matched\": " << json_num(matched)
+            c << "{\"kind\": \"" << kv.first << "\", \"maxabs\": " << json_num(acc.maxabs) << ", \"maxabs_at\": "
+              << json_str(acc.maxabs_at) << ", \"n\": " << e.size() << ", \"rows_matched\": " << json_num(matched)
               << ", \"nmse_median\": " << json_num(percentile(e, 0.5f)) << ", \"nmse_max\": " << json_num(e.back())
               << ", \"nmse_layer0_median\": " << json_num(percentile(l0, 0.5f)) << ", \"nmse_layer0_max\": "
               << json_num(l0.empty() ? NAN : l0.back()) << ", \"maxrel_median\": " << json_num(percentile(mr, 0.5f))
@@ -678,6 +720,10 @@ int main(int argc, char ** argv) {
             o << "],\n     \"position_max\": [";
             for (size_t i = 0; i < pa.pos_max.size(); ++i) {
                 o << (i ? ", " : "") << (compared((int) i) ? json_num(pa.pos_max[i]) : "null");
+            }
+            o << "],\n     \"capture_detail\": [";
+            for (size_t i = 0; i < pa.capture_detail.size(); ++i) {
+                o << (i ? ",\n       " : "\n       ") << pa.capture_detail[i];
             }
             o << "],\n     \"captures\": [";
             for (size_t i = 0; i < cap_json.size(); ++i) {

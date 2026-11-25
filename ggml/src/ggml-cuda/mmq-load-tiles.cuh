@@ -117,6 +117,93 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 }
 
+// moeq sign factors (S1_32): each 32-sign block expands, as Q1_0's 32-value chunks do, into 8 ints of +-1 bytes in the
+// Q8_0 tile layout; the per-32 scale is 1 (the bank's scales are separate tensors). The Q8_0 x q8_1 MMA / dp4a dot
+// then sums exactly in int32: per 32-value block at most 32*127 = 4064 in magnitude.
+template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_s1_32(
+        const char * __restrict__ x, const char * __restrict__ x_gate, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    GGML_UNUSED(x_gate);
+
+    constexpr int warp_size   = ggml_cuda_get_physical_warp_size();
+    constexpr int nwarps      = ggml_cuda_mmq_get_nthreads(type, J, fallback, GGML_PREC_Q8) / warp_size;
+    constexpr int I           = ggml_cuda_mmq_get_I(type, J, fallback, GGML_PREC_Q8);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    constexpr int sram_stride = ggml_cuda_mmq_get_sram_stride(type, J, fallback, GGML_PREC_Q8);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + 2*MMQ_TILE_NE_K);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q8_0, I);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+
+    constexpr int blocks_per_iter = MMQ_ITER_K / QK_S1_32;   // 8 blocks of 32 signs per 256-value iteration
+    constexpr int threads_per_row = blocks_per_iter;         // one thread per block
+    constexpr int nrows = warp_size / threads_per_row;
+    static_assert(QK_S1_32 == QK8_1, "one S1_32 block per q8_1 block");
+
+    const int kbx = threadIdx.x % threads_per_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nrows*nwarps) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
+
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const uint32_t qs = ((const block_s1_32 *) x + kbx0 + i*stride + kbx)->qs;
+        const int dst_offset = kbx*QI8_0;
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            const int q = (int) (qs >> (16*j)); // the low 16 bits are used
+
+#if defined(GGML_USE_HIP)
+            const int v0 = q1_0_unpack4_hip((uint32_t) q, 0);
+            const int v1 = q1_0_unpack4_hip((uint32_t) q, 1);
+            const int v2 = q1_0_unpack4_hip((uint32_t) q, 2);
+            const int v3 = q1_0_unpack4_hip((uint32_t) q, 3);
+#else
+            const int n0 = __byte_perm(0x11100100, 0x11100100, q >> 0);
+            const int n1 = __byte_perm(0x11100100, 0x11100100, q >> 2);
+            const int s0 = __byte_perm(0x01FF, 0x01FF, n0 >>  0);
+            const int s1 = __byte_perm(0x01FF, 0x01FF, n1 >>  0);
+            const int s2 = __byte_perm(0x01FF, 0x01FF, n0 >> 16);
+            const int s3 = __byte_perm(0x01FF, 0x01FF, n1 >> 16);
+            const int v0 = __byte_perm(s0, s1, 0x5410);
+            const int v1 = __byte_perm(s0, s1, 0x7632);
+            const int v2 = __byte_perm(s2, s3, 0x5410);
+            const int v3 = __byte_perm(s2, s3, 0x7632);
+#endif // defined(GGML_USE_HIP)
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_qs[i*sram_stride           + dst_offset + j*4+0] = v0;
+            x_qs[i*sram_stride           + dst_offset + j*4+1] = v1;
+            x_qs[i*sram_stride           + dst_offset + j*4+2] = v2;
+            x_qs[i*sram_stride           + dst_offset + j*4+3] = v3;
+#else
+            x_qs[i*(2*MMQ_TILE_NE_K + 1) + dst_offset + j*4+0] = v0;
+            x_qs[i*(2*MMQ_TILE_NE_K + 1) + dst_offset + j*4+1] = v1;
+            x_qs[i*(2*MMQ_TILE_NE_K + 1) + dst_offset + j*4+2] = v2;
+            x_qs[i*(2*MMQ_TILE_NE_K + 1) + dst_offset + j*4+3] = v3;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        }
+    }
+
+    // the per-32 weight scale is 1
+    const int ksx = threadIdx.x % blocks_per_iter;
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nwarps) {
+        const int i = i0 + threadIdx.y;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_df[i*sram_stride                           + ksx] = 1.0f;
+#else
+        x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + ksx] = 1.0f;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    }
+}
+
 template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q2_0(
         const char * __restrict__ x, const char * __restrict__ x_gate, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     GGML_UNUSED(x_gate);
