@@ -7212,6 +7212,44 @@ struct test_mul_mat_id_large : public test_mul_mat_id {
     }
 };
 
+// moeq binary-factor scale: an F16 table [n, E] gathered by flat expert ids [U*T], reshaped to [n, U, T] and multiplied
+// with activations [n, U or 1, T] (CUDA fuses the three into one kernel; the result must equal the unfused ops')
+struct test_mul_gathered_rows : public test_case {
+    const int64_t n, E, U, T;
+    const bool bcast;   // activations broadcast over the slots ([n, 1, T])
+    const bool swap;    // gathered rows as the MUL's first operand
+    std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "MUL_GATHERED_ROWS"; }
+    std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap); }
+    bool run_whole_graph() override { return true; }
+    test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap)
+        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap) {}
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * table = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n, E);
+        ggml_set_name(table, "table");
+        ggml_tensor * ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, U*T);
+        ggml_set_name(ids, "ids");
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, bcast ? 1 : U, T);
+        ggml_set_name(a, "a");
+        ggml_tensor * g = ggml_get_rows(ctx, table, ids);
+        ggml_tensor * r = ggml_reshape_3d(ctx, g, n, U, T);
+        ggml_tensor * out = swap ? ggml_mul(ctx, r, a) : ggml_mul(ctx, a, r);
+        ggml_set_name(out, "out");
+        return out;
+    }
+    void initialize_tensors(ggml_context * ctx) override {
+        std::mt19937 rng(77);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I32) {
+                std::vector<int32_t> v(ggml_nelements(t));
+                for (auto & x : v) { x = (int32_t) (rng() % E); }
+                ggml_backend_tensor_set(t, v.data(), 0, v.size()*sizeof(int32_t));
+            } else {
+                init_tensor_uniform(t, -2000.0f, 2000.0f);
+            }
+        }
+    }
+};
+
 // MUL_MAT_ID with expert ids repeated within a token's row
 struct test_mul_mat_id_dup : public test_mul_mat_id {
     using test_mul_mat_id::test_mul_mat_id;
@@ -13576,8 +13614,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     //   OLMoE-1B-7B at 1.0 bpw (64 experts, 8 used): in-bank 2048 x 2048 at rank 992, out-bank 2048 x 1024 at rank 640
     //   Qwen3.6-35B-A3B at the 0.67 target (256 experts, 8 used): in-bank 1024 x 2048 at rank 416, out-bank 2048 x 512 at 256
     // K = 320, 352, 416, 480, 576, 992 are multiples of 32 but not of MMQ's 256-value step: their row tails are read past
-    // the row against zero-padded activations. Token counts: 1 and 8 (mat-vec, its MoE limit is 8), 9 and 24 (the
-    // few-row MMQ range), 512 (MMQ tiles, experts with no tokens).
+    // the row against zero-padded activations. Token counts: 1 and 8 (mat-vec, its MoE limit is 8), 9 and up the tiled
+    // kernel on Turing and later (S1_32 has no few-row MMQ), 512 (MMQ tiles, experts with no tokens).
     {
         struct factor_step { int n_mats; int n_used; int64_t m; int64_t k; };
         const factor_step steps[] = {
@@ -13600,6 +13638,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // large activations at every dispatch boundary: mat-vec up to 8 tokens, the tiled kernel from 9, its column
         // tiles (16..128) and the next tile (129), 512; both products of Granite-1B's in-bank and Qwen3.6's out-bank
         // (the stage-2 F16 GEMM overflow passed every small-input case above)
+        // the scales' fused gather-multiply (CUDA) at the bank widths, broadcast and per-slot activations, both orders
+        for (int64_t T : { 1, 8, 9, 64, 512 }) {
+            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  false));
+            test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, false));
+            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, false, true));
+        }
+        test_cases.emplace_back(new test_mul_gathered_rows(2048, 256, 8, 64, true, false));
         const factor_step large_steps[] = { { 32, 8, 480, 1024 }, { 32, 8, 1024, 480 }, { 256, 8, 2048, 256 } };
         for (const factor_step & s : large_steps) {
             for (int n : { 1, 8, 9, 16, 32, 64, 128, 129, 512 }) {
