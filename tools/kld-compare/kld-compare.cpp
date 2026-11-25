@@ -310,7 +310,7 @@ static bool compare_captured(const std::string & name, const std::vector<float> 
           << json_num(n_keep ? (den > 0 ? num/den : num) : NAN) << ", \"rows_matched\": " << json_num(double(n_keep)/n_rows)
           << ", \"maxabs_ref\": " << json_num(maxabs_t) << ", \"nmse_token0\": "
           << json_num(tok0_end && den0 > 0 ? num0/den0 : NAN) << ", \"token0_slots_matched\": "
-          << (rows0 ? std::to_string(keep0) + "/" + std::to_string(rows0) : std::string("null")) << "}";
+          << (rows0 ? "\"" + std::to_string(keep0) + "/" + std::to_string(rows0) + "\"" : std::string("null")) << "}";
         detail->push_back(d.str());
     }
     if (n_keep == 0) {
