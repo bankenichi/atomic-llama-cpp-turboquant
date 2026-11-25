@@ -7,6 +7,7 @@
 #include "ggml-cuda/graph.cuh"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
+#include "ggml-cuda/mul-gathered.cuh"
 #include "ggml-cuda/arange.cuh"
 #include "ggml-cuda/argmax.cuh"
 #include "ggml-cuda/argsort.cuh"
@@ -2136,12 +2137,6 @@ static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml
         if (ggml_cuda_info().devices[ctx.device].prefer_fp32_acc) {
             compute_type = GGML_TYPE_BF16;
         }
-        // moeq sign factors dequantize to +-1 and their scales are applied after the product, so each sum carries the
-        // activations' full magnitude over the whole row (K = 320..1024 terms): an F16 GEMM overflows to inf/NaN on
-        // Granite's large activations and loses precision elsewhere. Exact +-1 weights with F32 accumulation instead.
-        if (src0->type == GGML_TYPE_S1_32) {
-            compute_type = GGML_TYPE_F32;
-        }
     } else if (compute_type == GGML_TYPE_F16 && !fast_fp16_hardware_available(cc)) {
         compute_type = GGML_TYPE_F32;
     } else if (compute_type == GGML_TYPE_BF16 && !fast_bf16_hardware_available(cc)) {
@@ -2174,6 +2169,15 @@ static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml
         } else if (env_cpp != "auto") {
             GGML_LOG_WARN("%s: unknown value for GGML_CUDA_CUBLAS_COMPUTE_TYPE: %s", __func__, env_cpp.c_str());
         }
+    }
+
+    // moeq sign factors dequantize to +-1 and their scales are applied after the product, so each sum carries the
+    // activations' full magnitude over the whole row (measured on Granite: up to 2.1e5 before s_post): an F16 or BF16
+    // GEMM overflows or loses the sums. Always the F32 compute type (cuBLAS runs it as TF32 on this handle: F32 range,
+    // 10-bit mantissa products), whatever GGML_CUDA_CUBLAS_COMPUTE_TYPE says. Since the tiled kernel (MMQ) this route
+    // serves S1_32 only on GPUs without Turing-class MMA or with GGML_CUDA_S1_32_MMQ=0.
+    if (src0->type == GGML_TYPE_S1_32) {
+        compute_type = GGML_TYPE_F32;
     }
 
     constexpr size_t max_src0_convert_size = 512ull * 1024 * 1024;
@@ -5678,6 +5682,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     if (ggml_cuda_fusion_disabled()) {
         return 0;
     }
+
+    // moeq binary-factor scales: GET_ROWS (F16 table by expert ids) -> RESHAPE -> MUL in one kernel (bit-identical)
+    if (cgraph->nodes[i]->op == GGML_OP_GET_ROWS && ggml_cuda_try_fuse_mul_gathered(*cuda_ctx, cgraph, i)) {
+        return 2;
+    }
     static const bool dual_rms_q8_enabled = [] {
         const char * env = getenv("GGML_CUDA_GB10_DUAL_RMS_Q8");
         return !env || std::atoi(env) != 0;
@@ -8384,7 +8393,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_F32:
                     case GGML_TYPE_F16:
                     case GGML_TYPE_Q1_0:
-                    case GGML_TYPE_S1_32:
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+                    case GGML_TYPE_S1_32: // moeq sign factors: CUDA only (the HIP/MUSA branches were never run)
+#endif
                     case GGML_TYPE_Q2_0:
                     case GGML_TYPE_PQ2_0:
                     case GGML_TYPE_PTQ1_0:
@@ -8427,7 +8438,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_BF16:
                     case GGML_TYPE_I32:
                     case GGML_TYPE_Q1_0:
-                    case GGML_TYPE_S1_32:
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+                    case GGML_TYPE_S1_32: // moeq sign factors: CUDA only (the HIP/MUSA branches were never run)
+#endif
                     case GGML_TYPE_Q2_0:
                     case GGML_TYPE_PQ2_0:
                     case GGML_TYPE_PTQ1_0:

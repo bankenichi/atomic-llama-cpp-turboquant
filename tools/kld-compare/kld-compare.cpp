@@ -266,6 +266,13 @@ static bool compare_captured(const std::string & name, const std::vector<float> 
         }
     }
     double num = 0.0, den = 0.0, maxd = 0.0, maxa = 0.0, num0 = 0.0, den0 = 0.0;
+    size_t keep0 = 0, rows0 = 0;   // token 0's rows (slots) and how many of them have the same expert
+    if (g_capture_tokens > 0 && n_rows % g_capture_tokens == 0 && n_rows > 1) {
+        rows0 = n_rows/g_capture_tokens;
+        for (size_t r = 0; r < rows0; ++r) {
+            keep0 += keep[r];
+        }
+    }
     const size_t tok0_end = g_capture_tokens > 0 && a.size() % g_capture_tokens == 0 ? a.size()/g_capture_tokens : 0;
     size_t n_keep = 0;
     for (size_t r = 0; r < n_rows; ++r) {
@@ -301,7 +308,8 @@ static bool compare_captured(const std::string & name, const std::vector<float> 
         d << "{\"tensor\": " << json_str(name) << ", \"window\": " << window << ", \"nmse\": "
           << json_num(n_keep ? (den > 0 ? num/den : num) : NAN) << ", \"rows_matched\": " << json_num(double(n_keep)/n_rows)
           << ", \"maxabs_ref\": " << json_num(maxabs_t) << ", \"nmse_token0\": "
-          << json_num(tok0_end && den0 > 0 ? num0/den0 : NAN) << "}";
+          << json_num(tok0_end && den0 > 0 ? num0/den0 : NAN) << ", \"token0_slots_matched\": "
+          << (rows0 ? std::to_string(keep0) + "/" + std::to_string(rows0) : std::string("null")) << "}";
         detail->push_back(d.str());
     }
     if (n_keep == 0) {
@@ -371,6 +379,7 @@ int main(int argc, char ** argv) {
     int n_ctx = 2048, n_threads = 8, n_chunks_max = -1, n_positions = -1, n_head = 64, capture_windows = 4;
     std::vector<int> window_list;   // --windows: decode only these windows (and capture all of them)
     bool capture_detail = false;
+    std::string print_re_s;         // --print: token 0's values of these captured tensors
     bool no_middle = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -410,6 +419,7 @@ int main(int argc, char ** argv) {
         else if (a == "--capture")         { capture_re = next(); }
         else if (a == "--capture-windows") { capture_windows = std::atoi(next()); }
         else if (a == "--capture-detail")  { capture_detail = true; }
+        else if (a == "--print")           { print_re_s = next(); }
         else if (a == "--windows") {
             std::stringstream ws(next());
             std::string item;
@@ -570,6 +580,30 @@ int main(int argc, char ** argv) {
             t_model[m] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             captures[m].active = false;
         }
+        if (capturing && !print_re_s.empty()) {
+            const std::regex pre(print_re_s);
+            for (size_t m = 0; m < n_models; ++m) {
+                for (const auto & kv : captures[m].tensors) {
+                    if (!std::regex_search(kv.first, pre) || kv.second.size() % n_eval != 0) {
+                        continue;
+                    }
+                    const size_t n0 = kv.second.size()/n_eval;
+                    const bool is_ids = kv.first.find("topk") != std::string::npos;
+                    std::printf("print window %d model %zu %s token 0:", w, m, kv.first.c_str());
+                    for (size_t q = 0; q < n0; ++q) {
+                        if (is_ids) {
+                            int32_t v;
+                            std::memcpy(&v, &kv.second[q], sizeof(v));
+                            std::printf(" %d", v);
+                        } else {
+                            std::printf(" %.6g", kv.second[q]);
+                        }
+                    }
+                    std::printf("\n");
+                }
+            }
+            std::fflush(stdout);
+        }
         for (pair_acc & pa : pairs) {
             const float * la = logits[pa.i].data();
             const float * lb = logits[pa.j].data();
@@ -663,7 +697,7 @@ int main(int argc, char ** argv) {
         for (size_t m = 0; m < n_models; ++m) {
             const model_spec & s = specs[m];
             o << (m ? ", " : "") << "{\"path\": " << json_str(s.path) << ", \"flash_attn\": \"" << llama_flash_attn_type_name(s.fa)
-              << "\", \"s1_32_dot\": \"" << dot_name(s.dot < 0 ? env_mode : s.dot) << "\", \"n_gpu_layers\": " << s.ngl
+              << "\", \"s1_32_dot\": \"" << (s.ngl > 0 ? "gpu" : dot_name(s.dot < 0 ? env_mode : s.dot)) << "\", \"n_gpu_layers\": " << s.ngl
               << ", \"ubatch\": " << std::min(s.ubatch, n_ctx) << ", \"seconds_per_window\": " << t_model[m]/n_chunks << "}";
         }
         o << "],\n  \"pairs\": [\n";
