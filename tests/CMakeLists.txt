@@ -292,7 +292,7 @@ llama_test(
     test-llama-archs
     NAME test-generate-factored-models
     LABEL behavior
-    ARGS -a "^(qwen35|qwen35moe|olmoe)$" -o "${FACTORED_MODEL_DIR}"
+    ARGS -a "^(qwen35|qwen35moe|olmoe|qwen4exp)$" -o "${FACTORED_MODEL_DIR}"
 )
 set_tests_properties(test-generate-factored-models PROPERTIES FIXTURES_SETUP factored-models)
 llama_build_and_test(test-factored-model.cpp LABEL behavior ARGS "${FACTORED_MODEL_DIR}")

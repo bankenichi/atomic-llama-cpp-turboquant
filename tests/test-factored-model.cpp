@@ -346,6 +346,7 @@ int main(int argc, char ** argv) {
         { "qwen35-dense.gguf",  false, 64, 96 },
         { "qwen35moe-moe.gguf", true,  64, 96 },
         { "olmoe-moe.gguf",     true,  96, 64 },
+        { "qwen4exp-moe.gguf",  true,  64, 96 },   // Qwen3.8-Flash-Next's architecture (its MTP draft head loads through the same lambda)
     };
     const fs::path tmp = fs::temp_directory_path();
     std::mt19937 rng(1234);
