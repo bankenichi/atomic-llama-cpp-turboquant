@@ -7187,6 +7187,28 @@ struct test_mul_mat_id : public test_case {
     }
 };
 
+// MUL_MAT with large activations (the dense factored feed-forward of Qwen3.5-9B multiplies 2-D S1_32 weights): values of
+// about `act` and one massive channel per row, as test_mul_mat_id_large below
+struct test_mul_mat_large : public test_mul_mat {
+    const float act;
+    test_mul_mat_large(ggml_type type_a, int64_t m, int64_t n, int64_t k, float act)
+        : test_mul_mat(type_a, GGML_TYPE_F32, m, n, k, { 1, 1 }, { 1, 1 }), act(act) {}
+    std::string vars() override { return test_mul_mat::vars() + ",act=" + std::to_string((int) act); }
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat::initialize_tensors(ctx);
+        ggml_tensor * b = ggml_get_tensor(ctx, "b");
+        GGML_ASSERT(b && b->type == GGML_TYPE_F32 && ggml_is_contiguous(b));
+        std::mt19937 rng(4322);
+        std::normal_distribution<float> nd(0.0f, act);
+        std::vector<float> row(b->ne[0]);
+        for (int64_t r = 0; r < ggml_nrows(b); ++r) {
+            for (float & v : row) { v = nd(rng); }
+            row[std::min<int64_t>(3, b->ne[0] - 1)] = (r % 2 ? -50.0f : 50.0f)*act;
+            ggml_backend_tensor_set(b, row.data(), r*b->nb[1], b->ne[0]*sizeof(float));
+        }
+    }
+};
+
 // MUL_MAT_ID with large activations, as real models produce them: values of about `act` and one massive channel
 // (element 3 of every row, 50*act, the sign alternating by row). For sign weights (S1_32) the sums then carry the
 // activations' full magnitude: with act = 2000 they reach about 1e5 and beyond, far past F16's 65504, so a route that
@@ -13652,6 +13674,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         for (int64_t T : { 1, 9, 512 }) {
             test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true, true));
             test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, true, true));
+        }
+        // 2-D MUL_MAT at the dense Qwen3.5-9B bank widths and ranks (Task 33: K = 4096, 3488, 12288, 3040; 3488 and 3040
+        // are not multiples of the tiled kernel's 256-value step), large activations, both sides of every boundary
+        for (int64_t k : { 4096, 3488, 12288, 3040 }) {
+            for (int n : { 1, 8, 9, 64, 512 }) {
+                test_cases.emplace_back(new test_mul_mat_large(GGML_TYPE_S1_32, 96, n, k, 2000.0f));
+            }
         }
         const factor_step large_steps[] = { { 32, 8, 480, 1024 }, { 32, 8, 1024, 480 }, { 256, 8, 2048, 256 } };
         for (const factor_step & s : large_steps) {
