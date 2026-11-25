@@ -284,6 +284,20 @@ set_tests_properties(test-generate-models PROPERTIES
     FIXTURES_SETUP generate-models
 )
 
+# Qwen3.5 files with the merged qkv+gate projection (the converter's output since upstream #32102) against the same model
+# with separate tensors, on a batch of several tokens
+set(QWEN35_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models-qwen35")
+file(MAKE_DIRECTORY "${QWEN35_MODEL_DIR}")
+llama_test(
+    test-llama-archs
+    NAME test-generate-qwen35-model
+    LABEL behavior
+    ARGS -a "^qwen35$" -o "${QWEN35_MODEL_DIR}"
+)
+set_tests_properties(test-generate-qwen35-model PROPERTIES FIXTURES_SETUP qwen35-model)
+llama_build_and_test(test-qwen35-merged-qkv-gate.cpp LABEL behavior ARGS "${QWEN35_MODEL_DIR}")
+set_tests_properties(test-qwen35-merged-qkv-gate PROPERTIES FIXTURES_REQUIRED qwen35-model)
+
 # Target model for test-speculative-rejection-sampling
 set(SPEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-speculative-models/target")
 file(MAKE_DIRECTORY "${SPEC_TARGET_DIR}")
