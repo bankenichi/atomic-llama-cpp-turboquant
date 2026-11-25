@@ -388,15 +388,25 @@ int main(int argc, char ** argv) {
 
         std::set<int> first = { 0 }, all;
         for (int il = 0; il < n_layer; ++il) { all.insert(il); }
-        for (const float scale : { 1.0f, 40.0f })
+        // big = 1000: the same matrices with s_pre x 1000 and s_post / 1000, so the packed product's input (s_pre * x)
+        // and its intermediate z = sign(V)^T (s_pre * x) are 1000 times larger (sums of +-1 times large values, as the
+        // Qwen models' large activations give them) while the dense matrix stays the same up to F16 rounding
+        std::vector<layer_plan> plans_big = plans;
+        for (auto & lp : plans_big) {
+            for (bank_data * bd : { &lp.gu, &lp.dn }) {
+                for (auto & s : bd->s_pre)  { s = ggml_fp16_to_fp32(ggml_fp32_to_fp16(s*1000.0f)); }
+                for (auto & s : bd->s_post) { s = ggml_fp16_to_fp32(ggml_fp32_to_fp16(s/1000.0f)); }
+            }
+        }
+        for (const bool big : { false, true })
         for (const std::set<int> * layers : { &first, &all }) {
-            rw.embd_scale = scale;
+            std::vector<layer_plan> & pl = big ? plans_big : plans;
             const std::string tag = std::string(mc.file) + (layers == &first ? " (layer 0 packed" : " (all layers packed") +
-                                    (scale != 1.0f ? ", embeddings x40: residual norms ~60)" : ")");
+                                    (big ? ", s_pre x1000 and s_post / 1000: z 1000x larger)" : ")");
             const std::string p_dense  = (tmp / "test-factored-model-dense.gguf").string();
             const std::string p_packed = (tmp / "test-factored-model-packed.gguf").string();
-            write_file(rw, *layers, plans, false, defect::none, p_dense);
-            write_file(rw, *layers, plans, true,  defect::none, p_packed);
+            write_file(rw, *layers, pl, false, defect::none, p_dense);
+            write_file(rw, *layers, pl, true,  defect::none, p_packed);
             bool ok_d = false, ok_p = false, ok_q = false;
             s1_32_set_mode(1);
             const std::vector<float> ld = logits_of(p_dense, tokens, &ok_d);

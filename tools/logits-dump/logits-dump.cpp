@@ -3,7 +3,7 @@
 // packed files against dense ones, one model in memory at a time).
 //
 //   llama-logits-dump -m MODEL.gguf (-f TEXT | --ids IDS.bin | --ref REF.bin) [-c 64] [--chunks N] [-t 8]
-//                     [-dot q8|f32] [-fa on|off|auto] [--no-repack] -o OUT
+//                     [-dot q8|f32] [-fa on|off|auto] [--kv-f32] [--no-repack] -o OUT
 //
 // Windows: -f gives llama-perplexity's (the text tokenized with the vocabulary's special tokens, cut into n_ctx-token
 // chunks, the first token of each replaced by BOS when the vocabulary adds BOS); --ids gives little-endian int32 token
@@ -56,7 +56,7 @@ static int s1_32_get_mode() {
 
 static void usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s -m MODEL.gguf (-f TEXT | --ids IDS.bin | --ref REF.bin) [-c 64] [--chunks N] [-t 8] "
-                         "[-dot q8|f32] [-fa on|off|auto] [--no-repack] -o OUT\n", argv0);
+                         "[-dot q8|f32] [-fa on|off|auto] [--kv-f32] [--no-repack] -o OUT\n", argv0);
 }
 
 struct pos_result { double kld; bool same_top; double nll_ref, nll_cand; };
@@ -88,7 +88,7 @@ static pos_result compare_position(const float * a, const float * b, int n_vocab
 int main(int argc, char ** argv) {
     std::string path_model, path_text, path_ids, path_ref, path_out;
     int n_ctx = 64, n_threads = 8, n_chunks_max = -1, dot = -1;
-    bool repack = true;
+    bool repack = true, kv_f32 = false;
     llama_flash_attn_type fa = LLAMA_FLASH_ATTN_TYPE_AUTO;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -109,6 +109,7 @@ int main(int argc, char ** argv) {
             const std::string v = next();
             dot = v == "f32" ? 1 : v == "q8" ? 0 : -1;
         }
+        else if (a == "--kv-f32") { kv_f32 = true; }
         else if (a == "-fa") {
             const std::string v = next();
             fa = v == "on" ? LLAMA_FLASH_ATTN_TYPE_ENABLED : v == "off" ? LLAMA_FLASH_ATTN_TYPE_DISABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
@@ -156,6 +157,10 @@ int main(int argc, char ** argv) {
     cp.n_threads       = n_threads;
     cp.n_threads_batch = n_threads;
     cp.flash_attn_type = fa;
+    if (kv_f32) {           // --kv-f32: the KV cache at F32, so that no rounding of K and V to F16 differs between files
+        cp.type_k = GGML_TYPE_F32;
+        cp.type_v = GGML_TYPE_F32;
+    }
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) {
         std::fprintf(stderr, "failed to create a context\n");
