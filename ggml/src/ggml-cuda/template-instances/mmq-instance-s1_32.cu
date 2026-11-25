@@ -2,4 +2,6 @@
 
 #include "../mmq.cuh"
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 DECL_MMQ_CASE(GGML_TYPE_S1_32);
+#endif
