@@ -117,6 +117,18 @@ static std::string json_num(double v) {
     return o.str();
 }
 
+// a JSON string literal (Windows paths carry backslashes)
+static std::string json_str(const std::string & v) {
+    std::string out = "\"";
+    for (char ch : v) {
+        if (ch == '"' || ch == '\\') {
+            out += '\\';
+        }
+        out += ch;
+    }
+    return out + "\"";
+}
+
 static std::string json_summary(const summary & r) {
     std::ostringstream o;
     o << "{\"n\": " << r.n << ", \"mean\": " << json_num(r.mean) << ", \"median\": " << json_num(r.median)
@@ -604,13 +616,13 @@ int main(int argc, char ** argv) {
     if (!path_out.empty()) {
         o.open(path_out);
         o.precision(9);
-        o << "{\n  \"text\": \"" << path_text << "\",\n  \"n_ctx\": " << n_ctx << ",\n  \"windows\": " << n_chunks
+        o << "{\n  \"text\": " << json_str(path_text) << ",\n  \"n_ctx\": " << n_ctx << ",\n  \"windows\": " << n_chunks
           << ",\n  \"tokens_per_window\": " << n_eval << ",\n  \"positions_compared\": " << n_cmp << ",\n  \"head\": " << n_head
           << ",\n  \"no_middle\": " << (no_middle ? "true" : "false") << ",\n";
         o << "  \"s1_32_dot\": \"" << dot_name(env_mode) << "\",\n  \"threads\": " << n_threads << ",\n  \"models\": [";
         for (size_t m = 0; m < n_models; ++m) {
             const model_spec & s = specs[m];
-            o << (m ? ", " : "") << "{\"path\": \"" << s.path << "\", \"flash_attn\": \"" << llama_flash_attn_type_name(s.fa)
+            o << (m ? ", " : "") << "{\"path\": " << json_str(s.path) << ", \"flash_attn\": \"" << llama_flash_attn_type_name(s.fa)
               << "\", \"s1_32_dot\": \"" << dot_name(s.dot < 0 ? env_mode : s.dot) << "\", \"n_gpu_layers\": " << s.ngl
               << ", \"ubatch\": " << std::min(s.ubatch, n_ctx) << ", \"seconds_per_window\": " << t_model[m]/n_chunks << "}";
         }
@@ -645,7 +657,7 @@ int main(int argc, char ** argv) {
               << ", \"nmse_median\": " << json_num(percentile(e, 0.5f)) << ", \"nmse_max\": " << json_num(e.back())
               << ", \"nmse_layer0_median\": " << json_num(percentile(l0, 0.5f)) << ", \"nmse_layer0_max\": "
               << json_num(l0.empty() ? NAN : l0.back()) << ", \"maxrel_median\": " << json_num(percentile(mr, 0.5f))
-              << ", \"maxrel_max\": " << json_num(mr.back()) << ", \"worst\": \"" << acc.worst << "\"}";
+              << ", \"maxrel_max\": " << json_num(mr.back()) << ", \"worst\": " << json_str(acc.worst) << "}";
             cap_json.push_back(c.str());
         }
         if (o.is_open()) {
@@ -653,11 +665,11 @@ int main(int argc, char ** argv) {
               << ", \"pos0\": " << json_summary(s0) << ", \"head\": " << json_summary(sh) << ", \"all\": " << json_summary(sa)
               << ",\n     \"window_protocol_mean\": [";
             for (size_t i = 0; i < pa.window_protocol_mean.size(); ++i) {
-                o << (i ? ", " : "") << pa.window_protocol_mean[i];
+                o << (i ? ", " : "") << json_num(pa.window_protocol_mean[i]);
             }
             o << "],\n     \"window_pos0\": [";
             for (size_t i = 0; i < pa.window_pos0.size(); ++i) {
-                o << (i ? ", " : "") << pa.window_pos0[i];
+                o << (i ? ", " : "") << json_num(pa.window_pos0[i]);
             }
             o << "],\n     \"position_mean\": [";
             for (size_t i = 0; i < pa.pos_sum.size(); ++i) {
