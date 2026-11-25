@@ -98,9 +98,12 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
             layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, flags);
         }
 
-        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
-        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
-        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        // moeq binary factors replace the three feed-forward matrices when the file has them
+        if (!create_tensor_factored_ffn(layer, il, n_embd, n_ff, flags)) {
+            layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
+            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
+            layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        }
     };
 
     auto load_block_mtp = [&](int il) {
@@ -618,6 +621,12 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il,
             gdn_state_rows ? inp->s_copy_main : nullptr);
 
+    // the merged qkv+gate projection (attn_qkv_gate) leaves z a view with that projection's row stride; the gated
+    // norm's GLU needs contiguous rows, so a strided z is copied (with more than one token the view below is not)
+    if (!ggml_is_contiguous(z)) {
+        z = ggml_cont(ctx0, z);
+    }
+
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_view_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs,
             ggml_row_size(z->type, head_v_dim), z->nb[1], z->nb[1] * n_seq_tokens, 0);
@@ -639,6 +648,13 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 ggml_tensor * llama_model_qwen35::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
     // Qwen3.5 does not use MoE FFN
     GGML_ASSERT(model.layers[il].ffn_gate_inp == nullptr);
+
+    // moeq binary factors (a packed student's quantized blocks; the other blocks keep their matrices)
+    if (model.layers[il].ffn_gate_up_f.present()) {
+        cur = build_factored_ffn(model.layers[il].ffn_gate_up_f, model.layers[il].ffn_down_f, cur, il);
+        cb(cur, "ffn_out", il);
+        return cur;
+    }
 
     cur = build_ffn(cur,
         model.layers[il].ffn_up, NULL, model.layers[il].ffn_up_s,

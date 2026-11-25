@@ -397,6 +397,11 @@ struct llama_layer {
     struct llama_factor_bank ffn_gate_up_exps_f;
     struct llama_factor_bank ffn_down_exps_f;
 
+    // dense ff as binary factors (moeq, e.g. Qwen3.5): the same two banks without the expert axis, used instead of
+    // ffn_gate, ffn_up and ffn_down (v [n_in, r], u [r, n_out], s_pre [n_in], s_post [n_out])
+    struct llama_factor_bank ffn_gate_up_f;
+    struct llama_factor_bank ffn_down_f;
+
     // ff MoE per-expert scales (NVFP4 per-tensor scale2)
     struct ggml_tensor * ffn_gate_exps_s   = nullptr;
     struct ggml_tensor * ffn_down_exps_s   = nullptr;
@@ -1179,6 +1184,10 @@ struct llama_model_base : public llama_model {
     // file; every other dimension is checked against n_embd_, n_ff_ and n_expert_.
     bool create_tensor_factored_exps(llama_layer & layer, int bid, int64_t n_embd_,
                 int64_t n_ff_, int64_t n_expert_, int flags);
+
+    // helper: the same for a dense ff (one matrix per bank, no expert axis): a fused gate+up bank and a down bank in
+    // place of ffn_gate, ffn_up and ffn_down; returns false and creates nothing when the file has none for this layer.
+    bool create_tensor_factored_ffn(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int flags);
 
     // helper: try to load merged qkv first, fall back to separate q, k, v
     void create_tensor_qkv(llama_layer & layer, int bid,

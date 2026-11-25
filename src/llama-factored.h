@@ -60,3 +60,38 @@ static inline llm_factored_mm_id_result llm_build_factored_mm_id(
 
     return res;
 }
+
+// The dense form (a feed-forward without experts, e.g. Qwen3.5's): one bank applied to every token,
+//     y = s_post * ( sign(U) * ( sign(V)^T * ( s_pre * x ) ) )
+// v      = sign(V)^T, S1_32 [n_in,  r]
+// u      = sign(U),   S1_32 [r,     n_out]
+// s_pre  = F16 or F32 [n_in],  s_post = F16 or F32 [n_out]: cast to F32 in the graph (the CPU's MUL has no F32 x F16
+//          kernel; one vector per bank)
+// cur    = [n_in, n_tokens]  ->  y [n_out, n_tokens]
+// Ops: (CPY), MUL, two MUL_MAT, MUL, so a backend's S1_32 MUL_MAT kernel serves it.
+static inline llm_factored_mm_id_result llm_build_factored_mm(
+        ggml_context * ctx,
+        ggml_tensor  * v,
+        ggml_tensor  * u,
+        ggml_tensor  * s_pre,
+        ggml_tensor  * s_post,
+        ggml_tensor  * cur) {
+    const int64_t n_in  = v->ne[0];
+    const int64_t rank  = v->ne[1];
+    const int64_t n_out = u->ne[1];
+
+    GGML_ASSERT(ggml_n_dims(v) == 2 && ggml_n_dims(u) == 2 && u->ne[0] == rank);
+    GGML_ASSERT(ggml_nelements(s_pre) == n_in && ggml_nelements(s_post) == n_out);
+    GGML_ASSERT(cur->ne[0] == n_in);
+
+    ggml_tensor * sp = s_pre->type  == GGML_TYPE_F32 ? s_pre  : ggml_cast(ctx, s_pre,  GGML_TYPE_F32);
+    ggml_tensor * so = s_post->type == GGML_TYPE_F32 ? s_post : ggml_cast(ctx, s_post, GGML_TYPE_F32);
+
+    llm_factored_mm_id_result res;
+    res.x_scaled   = ggml_mul(ctx, cur, sp);                // [n_in,  n_tokens]
+    res.z          = ggml_mul_mat(ctx, v, res.x_scaled);    // [r,     n_tokens]
+    res.y_unscaled = ggml_mul_mat(ctx, u, res.z);           // [n_out, n_tokens]
+    res.y          = ggml_mul(ctx, res.y_unscaled, so);
+
+    return res;
+}

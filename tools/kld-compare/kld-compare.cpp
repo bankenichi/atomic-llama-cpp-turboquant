@@ -333,7 +333,7 @@ static void usage(const char * argv0) {
     std::fprintf(stderr,
         "usage: %s [-fa on|off|auto] [-dot q8|f32|f32_v|f32_u] [-ngl N] [-ub N] -m MODEL.gguf [...] -m MODEL.gguf ...\n"
         "          -f TEXT [-c 2048] [-t 8] [--chunks N] [--positions P] [--head H] [--no-middle] [--pairs 0-1,...]\n"
-        "          [--capture REGEX] [--capture-windows N] [-o OUT.json]\n"
+        "          [--capture REGEX] [--capture-windows N] [--no-repack] [-o OUT.json]\n"
         "  -fa, -dot, -ngl and -ub apply to the models that follow them; every pair (i < j) is compared as\n"
         "  KL(model i || model j) unless --pairs lists the pairs\n", argv0);
 }
@@ -381,6 +381,7 @@ int main(int argc, char ** argv) {
     bool capture_detail = false;
     std::string print_re_s;         // --print: token 0's values of these captured tensors
     bool no_middle = false;
+    bool repack = true;  // --no-repack: weights stay in the mapped file, so two models of one file share its pages
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char * {
@@ -416,6 +417,7 @@ int main(int argc, char ** argv) {
         else if (a == "--positions")       { n_positions = std::atoi(next()); }
         else if (a == "--head")            { n_head = std::atoi(next()); }
         else if (a == "--no-middle")       { no_middle = true; }
+        else if (a == "--no-repack")       { repack = false; }
         else if (a == "--capture")         { capture_re = next(); }
         else if (a == "--capture-windows") { capture_windows = std::atoi(next()); }
         else if (a == "--capture-detail")  { capture_detail = true; }
@@ -471,6 +473,7 @@ int main(int argc, char ** argv) {
         if (!models[m]) {
             llama_model_params mp = llama_model_default_params();
             mp.n_gpu_layers = s.ngl;
+            mp.use_extra_bufts = repack;
             if (s.ngl == 0) {
                 mp.devices = no_devices; // no GPU device at all: weights and every operation on the CPU
             }
