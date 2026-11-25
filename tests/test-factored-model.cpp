@@ -419,7 +419,7 @@ int main(int argc, char ** argv) {
                 continue;
             }
             const double e_f32 = nmse(ld, lf), e_q8 = nmse(ld, lq);
-            const bool pass = e_f32 < 1e-8 && e_q8 < 1e-2 && std::isfinite(e_q8);
+            const bool pass = e_f32 < 1e-8 && e_q8 < 1e-4 && std::isfinite(e_q8);
             std::printf("%s %s: NMSE of the logits against the dense file: float path %.3e, 8-bit path %.3e\n",
                         pass ? "ok  " : "FAIL", tag.c_str(), e_f32, e_q8);
             failures += !pass;
