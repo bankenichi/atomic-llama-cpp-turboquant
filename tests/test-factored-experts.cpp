@@ -33,6 +33,7 @@ struct bank_case {
     bool view_ids;     // ids as a non-contiguous view, as the router's top-k is
     bool outlier;      // one massive activation
     bool dense;        // also run the dense F32 MUL_MAT_ID (costs E*n_out*r*n_in to build)
+    float scale_mul = 1.0f; // multiplies the scales: real models' scaled activations reach 1e3-1e4, beyond F16 sums
 };
 
 // one case's random data and its double-precision reference
@@ -76,7 +77,7 @@ static bank_data make_data(const bank_case & c, std::mt19937 & rng) {
     // scales: random, either sign, rounded to fp16 as moeq stores them
     d.sp.resize((size_t) E*n_in);
     d.so.resize((size_t) E*n_out);
-    for (float & s : d.sp) { s = ggml_fp16_to_fp32(ggml_fp32_to_fp16(0.05f*nd(rng))); }
+    for (float & s : d.sp) { s = ggml_fp16_to_fp32(ggml_fp32_to_fp16(0.05f*c.scale_mul*nd(rng))); }
     for (float & s : d.so) { s = ggml_fp16_to_fp32(ggml_fp32_to_fp16(0.05f*nd(rng))); }
 
     d.x.resize((size_t) n_in*n_slots_in*T);
@@ -336,6 +337,10 @@ int main(int argc, char ** argv) {
         { "Granite-1B in-bank, 32 exp, 64 tok", 1024, 480, 1024, 32, 8, 64, false, true,  false, false },
         { "Granite-1B out-bank, 32 exp, 64 tok", 512, 320, 1024, 32, 8, 64, true,  true,  false, false },
         { "Qwen3.6 in-bank (r 416), 16 exp",    2048, 416, 1024, 16, 8,  9, false, true,  false, false },
+        // large scaled activations through the batched route (64 tokens): s_pre * x reaches about 1e4 and the sums
+        // over the rank exceed F16's range, which an F16 GEMM turned into inf/NaN
+        { "Granite-1B in-bank, 64 tok, large",  1024, 480, 1024, 32, 8, 64, false, true,  true,  false, 100.0f },
+        { "Granite-1B out-bank, 64 tok, large",  512, 320, 1024, 32, 8, 64, true,  true,  true,  false, 100.0f },
     };
 
     std::vector<ggml_backend_dev_t> gpus;
