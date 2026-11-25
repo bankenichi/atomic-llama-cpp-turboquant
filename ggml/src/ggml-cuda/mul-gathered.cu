@@ -65,6 +65,11 @@ static void launch(ggml_backend_cuda_context & ctx, const ggml_tensor * gr, cons
 }
 
 int ggml_cuda_try_fuse_mul_gathered(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i) {
+    // GGML_CUDA_MUL_GATHERED=0 turns this fusion off alone (GGML_CUDA_DISABLE_FUSION turns off every fusion)
+    static const bool off = [] { const char * s = getenv("GGML_CUDA_MUL_GATHERED"); return s != nullptr && atoi(s) == 0; }();
+    if (off) {
+        return 0;
+    }
     ggml_tensor * node = cgraph->nodes[i];
 
     // the MUL of a gather that was skipped: compute the product from the table

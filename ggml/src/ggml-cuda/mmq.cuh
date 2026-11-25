@@ -1715,10 +1715,12 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     // received, and Stream-K splits the K range at fixed points of that list, so the F32 partial sums of a token were
     // grouped differently from one batch to the next (measured: every group of windows sharing a first token differed
     // at position 0). Each tile now sums its whole K range in one block, in the same order for every batch.
+    // GGML_CUDA_S1_32_STREAM_K=1 restores Stream-K for them (to measure what batch invariance costs).
+    static const bool s1_32_stream_k = [] { const char * s = getenv("GGML_CUDA_S1_32_STREAM_K"); return s != nullptr && atoi(s) != 0; }();
     const bool force_tiling = (GGML_CUDA_CC_IS_GCN(cc) &&
         (tiles_efficiency_percent >= 90 || ntiles_dst >= 2*stream_k_blocks ||
          k_chunks <= config.occupancy * tiles_nwaves)) ||
-        (type == GGML_TYPE_S1_32 && args.ids_dst != nullptr);
+        (type == GGML_TYPE_S1_32 && args.ids_dst != nullptr && !s1_32_stream_k);
 
     if (force_tiling) {
         GGML_ASSERT((rows_innermost ? args.ntj : nti) <= 65535); // gridDim.y limit
