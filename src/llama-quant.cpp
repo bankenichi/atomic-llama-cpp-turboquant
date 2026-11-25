@@ -306,6 +306,10 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
     // quantize only 2D+ tensors (matrices, experts, conv kernels)
     if (ggml_n_dims(tensor) < 2) return false;
 
+    // moeq binary-factor experts: the sign factors are exact and their scales are separate tensors; requantizing the
+    // signs would only enlarge them, so they (and, by the suffix rule below, their ".scale" tensors) are copied as is
+    if (tensor->type == GGML_TYPE_S1_32) return false;
+
     const std::string name = ggml_get_name(tensor);
 
     // This used to be a regex, but <regex> has an extreme cost to compile times.
@@ -1114,6 +1118,13 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     gguf_set_kv     (ctx_out.get(), ml.metadata);
     gguf_set_val_u32(ctx_out.get(), ml.llm_kv(LLM_KV_GENERAL_QUANTIZATION_VERSION).c_str(), GGML_QNT_VERSION);
     gguf_set_val_u32(ctx_out.get(), ml.llm_kv(LLM_KV_GENERAL_FILE_TYPE).c_str(), ftype);
+    // moeq binary-factor experts are copied unchanged (tensor_allows_quantization), so the output stays a packed file
+    for (const auto & it : ml.weights_map) {
+        if (it.second.tensor->type == GGML_TYPE_S1_32) {
+            gguf_set_val_u32(ctx_out.get(), ml.llm_kv(LLM_KV_GENERAL_FILE_TYPE).c_str(), LLAMA_FTYPE_MOSTLY_S1_32_EXPS);
+            break;
+        }
+    }
 
     // Remove split metadata
     gguf_remove_key(ctx_out.get(), ml.llm_kv(LLM_KV_SPLIT_NO).c_str());

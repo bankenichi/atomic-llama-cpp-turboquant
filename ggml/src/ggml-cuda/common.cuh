@@ -1139,6 +1139,15 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q1_0> {
     static constexpr int bs = sizeof(block_q1_0);
 };
 
+// moeq sign factors: 32 signs, no scale (the scales are separate tensors)
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_S1_32> {
+    static constexpr int qk = QK_S1_32;
+    static constexpr int qr = QR_S1_32;
+    static constexpr int qi = QI_S1_32;
+    static constexpr int bs = sizeof(block_s1_32);
+};
+
 template<>
 struct ggml_cuda_type_traits<GGML_TYPE_Q2_0> {
     static constexpr int qk = QK2_0;

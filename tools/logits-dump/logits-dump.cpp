@@ -31,6 +31,29 @@
 #include <string>
 #include <vector>
 
+#include "ggml-backend.h"
+
+#include <cstdlib>
+
+// the CPU's S1_32 activation mode is fork-private, reached through the CPU backend's proc address (0: Q8_0, 1: F32)
+static void * s1_32_mode_fn(const char * name) {
+    ggml_backend_reg_t reg = ggml_backend_reg_by_name("CPU");
+    void * fn = reg ? ggml_backend_reg_get_proc_address(reg, name) : nullptr;
+    if (fn == nullptr) {
+        std::fprintf(stderr, "the CPU backend does not offer %s\n", name);
+        std::exit(1);
+    }
+    return fn;
+}
+
+static void s1_32_set_mode(int mode) {
+    ((void (*)(int)) s1_32_mode_fn("ggml_backend_cpu_set_s1_32_dot_mode"))(mode);
+}
+
+static int s1_32_get_mode() {
+    return ((int (*)(void)) s1_32_mode_fn("ggml_backend_cpu_get_s1_32_dot_mode"))();
+}
+
 static void usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s -m MODEL.gguf (-f TEXT | --ids IDS.bin | --ref REF.bin) [-c 64] [--chunks N] [-t 8] "
                          "[-dot q8|f32] [-fa on|off|auto] [--no-repack] -o OUT\n", argv0);
@@ -114,7 +137,7 @@ int main(int argc, char ** argv) {
 
     llama_backend_init();
     if (dot >= 0) {
-        ggml_cpu_set_s1_32_dot_f32(dot == 1);
+        s1_32_set_mode(dot == 1 ? 1 : 0);
     }
 
     llama_model_params mp = llama_model_default_params();
@@ -165,7 +188,7 @@ int main(int argc, char ** argv) {
     }
     const bool add_bos = from_text && llama_vocab_get_add_bos(vocab);
     std::printf("%s: %d windows of %d, n_vocab %d, S1_32 dot %s, flash attention %s%s\n", path_model.c_str(), n_chunks,
-                n_ctx, n_vocab, ggml_cpu_get_s1_32_dot_f32() ? "f32" : "q8", llama_flash_attn_type_name(fa),
+                n_ctx, n_vocab, s1_32_get_mode() == 1 ? "f32" : "q8", llama_flash_attn_type_name(fa),
                 ref ? (", against " + path_ref).c_str() : "");
 
     FILE * out = std::fopen(path_out.c_str(), ref ? "w" : "wb");
@@ -178,9 +201,20 @@ int main(int argc, char ** argv) {
         std::fwrite("LGT1", 1, 4, out);
         std::fwrite(header, sizeof(uint32_t), 3, out);
     } else {
+        auto json_escaped = [](const std::string & s) {       // Windows paths hold backslashes
+            std::string r;
+            for (char c : s) {
+                if (c == '\\' || c == '"') {
+                    r += '\\';
+                }
+                r += c;
+            }
+            return r;
+        };
         std::fprintf(out, "{\n  \"model\": \"%s\",\n  \"reference\": \"%s\",\n  \"n_ctx\": %d,\n  \"s1_32_dot\": \"%s\",\n"
-                     "  \"flash_attn\": \"%s\",\n  \"threads\": %d,\n  \"windows\": [\n", path_model.c_str(), path_ref.c_str(),
-                     n_ctx, ggml_cpu_get_s1_32_dot_f32() ? "f32" : "q8", llama_flash_attn_type_name(fa), n_threads);
+                     "  \"flash_attn\": \"%s\",\n  \"threads\": %d,\n  \"windows\": [\n", json_escaped(path_model).c_str(),
+                     json_escaped(path_ref).c_str(),
+                     n_ctx, s1_32_get_mode() == 1 ? "f32" : "q8", llama_flash_attn_type_name(fa), n_threads);
     }
 
     common_batch batch(ctx);

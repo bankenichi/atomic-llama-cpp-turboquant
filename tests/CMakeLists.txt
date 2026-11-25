@@ -456,6 +456,8 @@ if (NOT GGML_BACKEND_DL AND GGML_CPU)
     llama_build_and_test(test-s1-32.cpp LABEL behavior LINK ggml)
     llama_build_and_test(test-factored-experts.cpp LABEL behavior LINK ggml)
     llama_test(test-factored-experts NAME test-factored-experts-f32 LABEL behavior ARGS f32)
+    # a packed Granite-MoE GGUF through llama: load, graph, logits against the dense file; the loader's refusals
+    llama_build_and_test(test-packed-experts.cpp LABEL behavior)
 endif()
 
 # libmtmd

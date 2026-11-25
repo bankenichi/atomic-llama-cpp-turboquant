@@ -30,6 +30,29 @@
 #include <string>
 #include <vector>
 
+#include "ggml-backend.h"
+
+#include <cstdlib>
+
+// the CPU's S1_32 activation mode is fork-private, reached through the CPU backend's proc address (0: Q8_0, 1: F32)
+static void * s1_32_mode_fn(const char * name) {
+    ggml_backend_reg_t reg = ggml_backend_reg_by_name("CPU");
+    void * fn = reg ? ggml_backend_reg_get_proc_address(reg, name) : nullptr;
+    if (fn == nullptr) {
+        std::fprintf(stderr, "the CPU backend does not offer %s\n", name);
+        std::exit(1);
+    }
+    return fn;
+}
+
+static void s1_32_set_mode(int mode) {
+    ((void (*)(int)) s1_32_mode_fn("ggml_backend_cpu_set_s1_32_dot_mode"))(mode);
+}
+
+static int s1_32_get_mode() {
+    return ((int (*)(void)) s1_32_mode_fn("ggml_backend_cpu_get_s1_32_dot_mode"))();
+}
+
 namespace fs = std::filesystem;
 
 struct bank_data {
@@ -99,6 +122,7 @@ struct rewrite {
     gguf_context * src = nullptr;
     ggml_context * src_data = nullptr;
     bool moe = false;
+    float embd_scale = 1.0f;
     std::vector<ggml_context *> owned;
 
     ~rewrite() {
@@ -147,7 +171,24 @@ static void write_file(rewrite & rw, const std::set<int> & layers, std::vector<l
             if (replaced_name(name, l, rw.moe)) { il = l; }
         }
         if (il < 0) {
-            gguf_add_tensor(dst, rw.get(name));
+            ggml_tensor * t = rw.get(name);
+            if (rw.embd_scale != 1.0f && name == "token_embd.weight" &&
+                (t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16)) {
+                // large residual activations (the Qwen models reach position-0 norms of 38 and more): scaled embeddings
+                ggml_context * c = rw.new_ctx(ggml_nbytes(t));
+                ggml_tensor * s = ggml_dup_tensor(c, t);
+                ggml_set_name(s, name.c_str());
+                for (int64_t i = 0; i < ggml_nelements(t); ++i) {
+                    if (t->type == GGML_TYPE_F32) {
+                        ((float *) s->data)[i] = rw.embd_scale*((const float *) t->data)[i];
+                    } else {
+                        ((ggml_fp16_t *) s->data)[i] = ggml_fp32_to_fp16(rw.embd_scale*ggml_fp16_to_fp32(((const ggml_fp16_t *) t->data)[i]));
+                    }
+                }
+                gguf_add_tensor(dst, s);
+            } else {
+                gguf_add_tensor(dst, t);
+            }
             continue;
         }
         if (name.find(".weight") == std::string::npos || done.count(il)) {
@@ -346,17 +387,20 @@ int main(int argc, char ** argv) {
 
         std::set<int> first = { 0 }, all;
         for (int il = 0; il < n_layer; ++il) { all.insert(il); }
+        for (const float scale : { 1.0f, 40.0f })
         for (const std::set<int> * layers : { &first, &all }) {
-            const std::string tag = std::string(mc.file) + (layers == &first ? " (layer 0 packed)" : " (all layers packed)");
+            rw.embd_scale = scale;
+            const std::string tag = std::string(mc.file) + (layers == &first ? " (layer 0 packed" : " (all layers packed") +
+                                    (scale != 1.0f ? ", embeddings x40: residual norms ~60)" : ")");
             const std::string p_dense  = (tmp / "test-factored-model-dense.gguf").string();
             const std::string p_packed = (tmp / "test-factored-model-packed.gguf").string();
             write_file(rw, *layers, plans, false, defect::none, p_dense);
             write_file(rw, *layers, plans, true,  defect::none, p_packed);
             bool ok_d = false, ok_p = false, ok_q = false;
-            ggml_cpu_set_s1_32_dot_f32(true);
+            s1_32_set_mode(1);
             const std::vector<float> ld = logits_of(p_dense, tokens, &ok_d);
             const std::vector<float> lf = logits_of(p_packed, tokens, &ok_p);
-            ggml_cpu_set_s1_32_dot_f32(false);
+            s1_32_set_mode(0);
             const std::vector<float> lq = logits_of(p_packed, tokens, &ok_q);
             if (!ok_d || !ok_p || !ok_q) {
                 std::fprintf(stderr, "FAIL %s: a file did not load (dense %d, packed %d)\n", tag.c_str(), ok_d, ok_p);
@@ -369,6 +413,8 @@ int main(int argc, char ** argv) {
                         pass ? "ok  " : "FAIL", tag.c_str(), e_f32, e_q8);
             failures += !pass;
         }
+
+        rw.embd_scale = 1.0f;
 
         // the loader's refusals
         const std::pair<defect, const char *> bads[] = {

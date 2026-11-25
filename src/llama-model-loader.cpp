@@ -43,6 +43,7 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_F8_E4M3:   name = LLAMA_FTYPE_PREFIX "F8_E4M3"; break;
         case LLAMA_FTYPE_MOSTLY_TQ3_1S:    name = LLAMA_FTYPE_PREFIX "TQ3_1S - WHT-rotated 3-bit"; break;
         case LLAMA_FTYPE_MOSTLY_TQ4_1S:    name = LLAMA_FTYPE_PREFIX "TQ4_1S - WHT-rotated 4-bit"; break;
+        case LLAMA_FTYPE_MOSTLY_S1_32_EXPS: name = LLAMA_FTYPE_PREFIX "S1_32 binary-factor experts, mixed trunk"; break;
         case LLAMA_FTYPE_MOSTLY_PQ2_0: name = LLAMA_FTYPE_PREFIX "PQ2_0 - 2.13 bpw (group 128)"; break;
         case LLAMA_FTYPE_MOSTLY_PTQ1_0: name = LLAMA_FTYPE_PREFIX "PTQ1_0 - 1.75 bpw ternary (group 128)"; break;
         // ggufs packed before the Q2_0_G128 -> PQ2_0 rename carry the old ftype value.
@@ -1058,7 +1059,9 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
     switch (op) {
         case GGML_OP_GET_ROWS:
             {
-                ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 512);
+                // one index row per matrix of w: [512] for a 2-D table, [512, ne2, ne3] for stacked ones
+                // (the binary-factor scales are [n, 1, n_expert])
+                ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, 512, w->ne[2], w->ne[3]);
                 op_tensor = ggml_get_rows(ctx, w, b);
             } break;
         case GGML_OP_SET_ROWS:
@@ -1316,6 +1319,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         } else if (hparams.router_layer >= 0 && tn.suffix != nullptr &&
                 (strcmp(tn.suffix, "lora_a") == 0 || strcmp(tn.suffix, "lora_b") == 0)) {
             op = GGML_OP_MUL_MAT_ID;
+        } else if (tn.suffix != nullptr && strcmp(tn.suffix, "scale") == 0 &&
+                (tn.tensor == LLM_TENSOR_FFN_GATE_UP_EXPS_V || tn.tensor == LLM_TENSOR_FFN_GATE_UP_EXPS_U ||
+                 tn.tensor == LLM_TENSOR_FFN_DOWN_EXPS_V    || tn.tensor == LLM_TENSOR_FFN_DOWN_EXPS_U)) {
+            // moeq binary-factor scales [n, 1, E]: the graph gathers one row per used expert (llama-factored.h)
+            op = GGML_OP_GET_ROWS;
         } else {
             op = info.op;
         }

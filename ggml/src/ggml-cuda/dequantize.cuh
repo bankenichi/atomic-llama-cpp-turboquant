@@ -24,6 +24,14 @@ static __device__ __forceinline__ void dequantize_q1_0(const void * vx, const in
     v.y = (2*bit_1 - 1) * d;
 }
 
+// moeq sign factors: bit j of the block's word is element j, 1 = +1, 0 = -1, no scale
+static __device__ __forceinline__ void dequantize_s1_32(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const uint32_t qs = ((const block_s1_32 *) vx)[ib].qs;
+
+    v.x = ((qs >>  iqs     ) & 1u) ? 1.0f : -1.0f;
+    v.y = ((qs >> (iqs + 1)) & 1u) ? 1.0f : -1.0f;
+}
+
 static __device__ __forceinline__ void dequantize_q2_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q2_0 * x = (const block_q2_0 *) vx;
 

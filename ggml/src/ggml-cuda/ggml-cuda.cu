@@ -2136,6 +2136,12 @@ static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml
         if (ggml_cuda_info().devices[ctx.device].prefer_fp32_acc) {
             compute_type = GGML_TYPE_BF16;
         }
+        // moeq sign factors dequantize to +-1 and their scales are applied after the product, so each sum carries the
+        // activations' full magnitude over the whole row (K = 320..1024 terms): an F16 GEMM overflows to inf/NaN on
+        // Granite's large activations and loses precision elsewhere. Exact +-1 weights with F32 accumulation instead.
+        if (src0->type == GGML_TYPE_S1_32) {
+            compute_type = GGML_TYPE_F32;
+        }
     } else if (compute_type == GGML_TYPE_F16 && !fast_fp16_hardware_available(cc)) {
         compute_type = GGML_TYPE_F32;
     } else if (compute_type == GGML_TYPE_BF16 && !fast_bf16_hardware_available(cc)) {
@@ -8378,6 +8384,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_F32:
                     case GGML_TYPE_F16:
                     case GGML_TYPE_Q1_0:
+                    case GGML_TYPE_S1_32:
                     case GGML_TYPE_Q2_0:
                     case GGML_TYPE_PQ2_0:
                     case GGML_TYPE_PTQ1_0:
@@ -8420,6 +8427,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_BF16:
                     case GGML_TYPE_I32:
                     case GGML_TYPE_Q1_0:
+                    case GGML_TYPE_S1_32:
                     case GGML_TYPE_Q2_0:
                     case GGML_TYPE_PQ2_0:
                     case GGML_TYPE_PTQ1_0:
