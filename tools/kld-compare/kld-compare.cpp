@@ -334,8 +334,7 @@ static void usage(const char * argv0) {
     std::fprintf(stderr,
         "usage: %s [-fa on|off|auto] [-dot q8|f32|f32_v|f32_u] [-ngl N] [-ub N] -m MODEL.gguf [...] -m MODEL.gguf ...\n"
         "          -f TEXT [-c 2048] [-t 8] [--chunks N] [--positions P] [--head H] [--no-middle] [--pairs 0-1,...]\n"
-        "          [--capture REGEX] [--capture-windows N] [--no-repack] [--router-census OUT.csv] [-o OUT.json]
-"
+        "          [--capture REGEX] [--capture-windows N] [--no-repack] [--router-census OUT.csv] [-o OUT.json]\n"
         "  -fa, -dot, -ngl and -ub apply to the models that follow them; every pair (i < j) is compared as\n"
         "  KL(model i || model j) unless --pairs lists the pairs\n", argv0);
 }
