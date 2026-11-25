@@ -56,7 +56,9 @@ static int s1_32_get_mode() {
 
 static void usage(const char * argv0) {
     std::fprintf(stderr, "usage: %s -m MODEL.gguf (-f TEXT | --ids IDS.bin | --ref REF.bin) [-c 64] [--chunks N] [-t 8] "
-                         "[-dot q8|f32] [-fa on|off|auto] [--no-repack] -o OUT\n", argv0);
+                         "[-dot q8|f32] [-fa on|off|auto] [--no-repack] [-ngl N] [-ub N] [--kv-ctx N] -o OUT\n"
+                         "  -ngl: layers on the GPU (default 0); -ub: ubatch (default the window); --kv-ctx: the context\n"
+                         "  allocated (default the window), to measure the memory of a long context while decoding short windows\n", argv0);
 }
 
 struct pos_result { double kld; bool same_top; double nll_ref, nll_cand; };
@@ -88,6 +90,7 @@ static pos_result compare_position(const float * a, const float * b, int n_vocab
 int main(int argc, char ** argv) {
     std::string path_model, path_text, path_ids, path_ref, path_out;
     int n_ctx = 64, n_threads = 8, n_chunks_max = -1, dot = -1;
+    int n_gpu_layers = 0, n_ubatch = 0, kv_ctx = 0;   // moeq Task 30: GPU runs, ubatch, allocated context
     bool repack = true;
     llama_flash_attn_type fa = LLAMA_FLASH_ATTN_TYPE_AUTO;
     for (int i = 1; i < argc; ++i) {
@@ -105,6 +108,9 @@ int main(int argc, char ** argv) {
         else if (a == "-t")          { n_threads = std::atoi(next()); }
         else if (a == "--chunks")    { n_chunks_max = std::atoi(next()); }
         else if (a == "--no-repack") { repack = false; }
+        else if (a == "-ngl")        { n_gpu_layers = std::atoi(next()); }
+        else if (a == "-ub")         { n_ubatch = std::atoi(next()); }
+        else if (a == "--kv-ctx")    { kv_ctx = std::atoi(next()); }
         else if (a == "-dot") {
             const std::string v = next();
             dot = v == "f32" ? 1 : v == "q8" ? 0 : -1;
@@ -141,7 +147,7 @@ int main(int argc, char ** argv) {
     }
 
     llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers    = 0;
+    mp.n_gpu_layers    = n_gpu_layers;
     mp.use_extra_bufts = repack;
     llama_model * model = llama_model_load_from_file(path_model.c_str(), mp);
     if (!model) {
@@ -149,9 +155,9 @@ int main(int argc, char ** argv) {
         return 1;
     }
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx           = n_ctx;
+    cp.n_ctx           = std::max(n_ctx, kv_ctx);
     cp.n_batch         = n_ctx;
-    cp.n_ubatch        = n_ctx;
+    cp.n_ubatch        = n_ubatch > 0 ? std::min(n_ubatch, n_ctx) : n_ctx;
     cp.n_seq_max       = 1;
     cp.n_threads       = n_threads;
     cp.n_threads_batch = n_threads;
