@@ -1710,12 +1710,18 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     // Use tiling when Stream-K is unlikely to improve performance:
     // With at least 2 full waves of tiles, tiling already saturates the device and Stream-K only adds overhead.
     // With few K chunks per tile, the extra parallelism of Stream-K is not needed.
-    const bool force_tiling = GGML_CUDA_CC_IS_GCN(cc) &&
+    // S1_32 expert products (MUL_MAT_ID): plain tiling, so that a token's result does not depend on the batch. The MoE
+    // tile list (tile_spec) puts an expert's columns at a position that depends on how many tokens the other experts
+    // received, and Stream-K splits the K range at fixed points of that list, so the F32 partial sums of a token were
+    // grouped differently from one batch to the next (measured: every group of windows sharing a first token differed
+    // at position 0). Each tile now sums its whole K range in one block, in the same order for every batch.
+    const bool force_tiling = (GGML_CUDA_CC_IS_GCN(cc) &&
         (tiles_efficiency_percent >= 90 || ntiles_dst >= 2*stream_k_blocks ||
-         k_chunks <= config.occupancy * tiles_nwaves);
+         k_chunks <= config.occupancy * tiles_nwaves)) ||
+        (type == GGML_TYPE_S1_32 && args.ids_dst != nullptr);
 
     if (force_tiling) {
-        GGML_ASSERT(nti <= 65535);
+        GGML_ASSERT((rows_innermost ? args.ntj : nti) <= 65535); // gridDim.y limit
         CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, fallback, prec_src1, has_fusion, true>), nbytes_shared);
         mul_mat_q<type, J, fallback, prec_src1, has_fusion, true><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
             (args.x, (const char *) args.fusion.gate, args.y, args.ids_dst, args.tile_spec, args.dst, nullptr,
