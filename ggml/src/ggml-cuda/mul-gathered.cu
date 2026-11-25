@@ -93,7 +93,9 @@ int ggml_cuda_try_fuse_mul_gathered(ggml_backend_cuda_context & ctx, const ggml_
         const ggml_tensor * t = cgraph->nodes[j];
         if (rs_i < 0) {
             if (t->op == GGML_OP_RESHAPE && t->src[0] == node) {
-                if (!ggml_node_has_n_uses(cgraph, j, 1)) {
+                // the RESHAPE is a view of the gather, and ggml_node_has_n_uses refuses every view (it returned false
+                // here for every bank, so this fusion never ran): check its own use count and output flag instead
+                if (ggml_node_get_use_count(cgraph, j) != 1 || (t->flags & GGML_TENSOR_FLAG_OUTPUT)) {
                     return 0;
                 }
                 rs_i = j;

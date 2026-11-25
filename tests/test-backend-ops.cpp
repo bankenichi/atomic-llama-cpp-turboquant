@@ -7239,13 +7239,13 @@ struct test_mul_mat_id_large : public test_mul_mat_id {
 struct test_mul_gathered_rows : public test_case {
     const int64_t n, E, U, T;
     const bool bcast;   // activations broadcast over the slots ([n, 1, T])
-    const bool swap;    // gathered rows as the MUL's first operand
+    const bool swap;    // gathered rows as the MUL's first operand (required with bcast: ggml_mul broadcasts its second operand only)
     const bool deferred; // another node between the gather and its MUL (CUDA skips the gather, the MUL computes it)
     std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "MUL_GATHERED_ROWS"; }
     std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap) + ",deferred=" + std::to_string(deferred); }
     bool run_whole_graph() override { return true; }
     test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap, bool deferred = false)
-        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap), deferred(deferred) {}
+        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap), deferred(deferred) { GGML_ASSERT(swap || !bcast); }
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * table = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n, E);
         ggml_set_name(table, "table");
@@ -13666,11 +13666,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // (the stage-2 F16 GEMM overflow passed every small-input case above)
         // the scales' fused gather-multiply (CUDA) at the bank widths, broadcast and per-slot activations, both orders
         for (int64_t T : { 1, 8, 9, 64, 512 }) {
-            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  false));
+            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true));
             test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, false));
             test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, false, true));
         }
-        test_cases.emplace_back(new test_mul_gathered_rows(2048, 256, 8, 64, true, false));
+        test_cases.emplace_back(new test_mul_gathered_rows(2048, 256, 8, 64, true, true));
         for (int64_t T : { 1, 9, 512 }) {
             test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true, true));
             test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, true, true));
