@@ -66,7 +66,9 @@ static_assert(sizeof(block_fp4_mmq)  == sizeof(block_q8_1_mmq),    "Unexpected b
 static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
     switch (type_x) {
         case GGML_TYPE_Q1_0:
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
         case GGML_TYPE_S1_32:
+#endif // S1_32 CUDA only
         case GGML_TYPE_Q2_0:
         case GGML_TYPE_PQ2_0:
 #if !defined(GGML_USE_HIP)
@@ -416,7 +418,9 @@ static constexpr __device__ int ggml_cuda_mmq_get_rows_per_warp(ggml_type type, 
 static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml_type type, int I) {
     switch (type) {
         case GGML_TYPE_Q1_0:    return MMQ_DP4A_TXS_Q8_0;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
         case GGML_TYPE_S1_32:   return MMQ_DP4A_TXS_Q8_0;
+#endif // S1_32 CUDA only
         case GGML_TYPE_Q2_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_PQ2_0:
             return MMQ_DP4A_TXS_Q8_0;
@@ -632,12 +636,14 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
                     ggml_cuda_mmq_load_tiles_q1_0<type, J, fallback>,
                     ggml_cuda_mmq_vec_dot_q8_0_q8_1_dp4a<type, J, fallback>,
                     ggml_cuda_mmq_write_back_dp4a<type, J, fallback, prec_src1>);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
             case GGML_TYPE_S1_32:
                 return ggml_cuda_mmq_util_funcs(
                     VDR_Q1_0_Q8_1_MMQ,
                     ggml_cuda_mmq_load_tiles_s1_32<type, J, fallback>,
                     ggml_cuda_mmq_vec_dot_q8_0_q8_1_dp4a<type, J, fallback>,
                     ggml_cuda_mmq_write_back_dp4a<type, J, fallback, prec_src1>);
+#endif // S1_32 CUDA only
             case GGML_TYPE_Q2_0:
                 return ggml_cuda_mmq_util_funcs(
                     VDR_Q2_0_Q8_1_MMQ,
@@ -826,12 +832,14 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
                 ggml_cuda_mmq_load_tiles_q1_0<type, J, fallback>,
                 ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma<type, J, fallback, MMQ_Q8_1_DS_LAYOUT_D4>,
                 ggml_cuda_mmq_write_back_mma<type, J, fallback, prec_src1, false>);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
         case GGML_TYPE_S1_32:
             return ggml_cuda_mmq_util_funcs(
                 -1,
                 ggml_cuda_mmq_load_tiles_s1_32<type, J, fallback>,
                 ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma<type, J, fallback, MMQ_Q8_1_DS_LAYOUT_D4>,
                 ggml_cuda_mmq_write_back_mma<type, J, fallback, prec_src1, false>);
+#endif // S1_32 CUDA only
         case GGML_TYPE_Q2_0:
             return ggml_cuda_mmq_util_funcs(
                 -1,
@@ -1716,7 +1724,14 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     // grouped differently from one batch to the next (measured: every group of windows sharing a first token differed
     // at position 0). Each tile now sums its whole K range in one block, in the same order for every batch.
     // GGML_CUDA_S1_32_STREAM_K=1 restores Stream-K for them (to measure what batch invariance costs).
-    static const bool s1_32_stream_k = [] { const char * s = getenv("GGML_CUDA_S1_32_STREAM_K"); return s != nullptr && atoi(s) != 0; }();
+    static const bool s1_32_stream_k = [] {
+        const char * s = getenv("GGML_CUDA_S1_32_STREAM_K");
+        const bool v = s != nullptr && atoi(s) != 0;
+        if (v && type == GGML_TYPE_S1_32) {
+            fprintf(stderr, "ggml_cuda: GGML_CUDA_S1_32_STREAM_K=1: S1_32 expert products use Stream-K (not batch-invariant)\n");
+        }
+        return v;
+    }();
     const bool force_tiling = (GGML_CUDA_CC_IS_GCN(cc) &&
         (tiles_efficiency_percent >= 90 || ntiles_dst >= 2*stream_k_blocks ||
          k_chunks <= config.occupancy * tiles_nwaves)) ||
@@ -1866,7 +1881,9 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     template void mul_mat_q_case<type, GGML_PREC_Q4>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
 
 extern DECL_MMQ_CASE(GGML_TYPE_Q1_0);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
 extern DECL_MMQ_CASE(GGML_TYPE_S1_32);
+#endif // S1_32 CUDA only
 extern DECL_MMQ_CASE(GGML_TYPE_Q2_0);
 extern DECL_MMQ_CASE(GGML_TYPE_PQ2_0);
 #if !defined(GGML_USE_HIP)

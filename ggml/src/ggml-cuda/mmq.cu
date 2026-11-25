@@ -11,9 +11,11 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
         case GGML_TYPE_Q1_0:
             mul_mat_q_case<GGML_TYPE_Q1_0, GGML_PREC_Q8>(ctx, args, stream);
             break;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
         case GGML_TYPE_S1_32:
             mul_mat_q_case<GGML_TYPE_S1_32, GGML_PREC_Q8>(ctx, args, stream);
             break;
+#endif // S1_32 CUDA only
         case GGML_TYPE_Q2_0:
             mul_mat_q_case<GGML_TYPE_Q2_0, GGML_PREC_Q8>(ctx, args, stream);
             break;
@@ -524,15 +526,21 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
             mmq_supported = turing_mma_available(cc);
             break;
 #endif
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
         case GGML_TYPE_S1_32: {
             // moeq sign factors: the Ampere MMA tile configuration only (Blackwell falls back to it); elsewhere the
             // sorted fallback (F32 GEMM per expert). GGML_CUDA_S1_32_MMQ=0 selects that fallback here too (A/B knob).
             static const bool s1_32_mmq_off = [] {
                 const char * s = getenv("GGML_CUDA_S1_32_MMQ");
-                return s != nullptr && atoi(s) == 0;
+                const bool v = s != nullptr && atoi(s) == 0;
+                if (v) {
+                    fprintf(stderr, "ggml_cuda: GGML_CUDA_S1_32_MMQ=0: S1_32 batched products use the TF32 cuBLAS fallback\n");
+                }
+                return v;
             }();
             mmq_supported = turing_mma_available(cc) && !s1_32_mmq_off;
         } break;
+#endif // S1_32 CUDA only
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q2_0:
         case GGML_TYPE_PQ2_0:

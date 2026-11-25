@@ -2,7 +2,12 @@
 
 #include "ggml-impl.h"
 
-#include <unordered_set>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <set>
+#include <utility>
 
 // dst[i, k, t] = a[i, k or 0, t] * table[i, ids[k + U*t]]: one block per (slot, token) row
 static __global__ void k_mul_gathered_rows(
@@ -22,8 +27,77 @@ static __global__ void k_mul_gathered_rows(
     }
 }
 
-// the gathers whose GET_ROWS was skipped; their MUL computes the product from the table (cleared as they are used)
-static thread_local std::unordered_set<const ggml_tensor *> g_deferred_gathers;
+// ---- counters ------------------------------------------------------------------------------------------------------
+
+static std::atomic<int64_t> g_fused{0};
+static std::atomic<int64_t> g_unfused{0};
+static std::atomic<int64_t> g_graphs{0};
+static std::atomic<int64_t> g_total_fused{0};      // process totals (not reset by tests)
+static std::atomic<int64_t> g_total_unfused{0};
+static std::atomic<int64_t> g_total_graphs{0};
+static thread_local int64_t t_graph_fused   = 0;
+static thread_local int64_t t_graph_unfused = 0;
+
+static void print_totals() {
+    const int64_t f = g_total_fused.load(), u = g_total_unfused.load(), g = g_total_graphs.load();
+    if (f + u > 0) {
+        std::fprintf(stderr, "ggml_cuda: S1_32 scale gathers over %lld graph evaluations: %lld fused, %lld left unfused\n",
+                (long long) g, (long long) f, (long long) u);
+    }
+}
+
+void ggml_cuda_mul_gathered_graph_begin() {
+    t_graph_fused   = 0;
+    t_graph_unfused = 0;
+}
+
+void ggml_cuda_mul_gathered_graph_end() {
+    if (t_graph_fused + t_graph_unfused == 0) {
+        return;   // no candidate, or a CUDA graph replay (nodes not evaluated)
+    }
+    g_graphs++;
+    g_total_graphs++;
+    // one line per distinct (fused, unfused) pattern, so every job shows what its graphs did without one line per token
+    static std::mutex mtx;
+    static std::set<std::pair<int64_t, int64_t>> seen;
+    static bool registered = false;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!registered) {
+        std::atexit(print_totals);
+        registered = true;
+    }
+    if (seen.size() < 32 && seen.insert({t_graph_fused, t_graph_unfused}).second) {
+        std::fprintf(stderr, "ggml_cuda: S1_32 scale gathers in a graph: %lld fused, %lld left unfused%s\n",
+                (long long) t_graph_fused, (long long) t_graph_unfused,
+                t_graph_unfused > 0 ? " (fusion off, or a shape it does not cover)" : "");
+    }
+}
+
+void ggml_backend_cuda_mul_gathered_stats(int64_t * fused, int64_t * unfused, int64_t * graphs) {
+    if (fused)   { *fused   = g_fused.load(); }
+    if (unfused) { *unfused = g_unfused.load(); }
+    if (graphs)  { *graphs  = g_graphs.load(); }
+}
+
+void ggml_backend_cuda_mul_gathered_reset() {
+    g_fused   = 0;
+    g_unfused = 0;
+    g_graphs  = 0;
+}
+
+static void count(bool fused) {
+    if (fused) {
+        g_fused++;
+        g_total_fused++;
+        t_graph_fused++;
+    } else {
+        g_unfused++;
+        g_total_unfused++;
+        t_graph_unfused++;
+    }
+}
+
+// ---- matching ------------------------------------------------------------------------------------------------------
 
 static bool gather_ok(const ggml_tensor * gr) {
     const ggml_tensor * table = gr->src[0];
@@ -53,6 +127,11 @@ static const ggml_tensor * mul_operand(const ggml_tensor * mul, const ggml_tenso
     return a;
 }
 
+static bool is_view_or_noop(const ggml_tensor * t) {
+    return ggml_is_empty(t) || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_TRANSPOSE || t->op == GGML_OP_VIEW ||
+        t->op == GGML_OP_PERMUTE || t->op == GGML_OP_NONE;
+}
+
 static void launch(ggml_backend_cuda_context & ctx, const ggml_tensor * gr, const ggml_tensor * rs,
                    const ggml_tensor * a, ggml_tensor * mul) {
     const int64_t n = rs->ne[0], U = rs->ne[1], T = rs->ne[2];
@@ -64,63 +143,61 @@ static void launch(ggml_backend_cuda_context & ctx, const ggml_tensor * gr, cons
     CUDA_CHECK(cudaGetLastError());
 }
 
-int ggml_cuda_try_fuse_mul_gathered(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i) {
+int ggml_cuda_try_fuse_mul_gathered(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i, bool fusion_allowed) {
     // GGML_CUDA_MUL_GATHERED=0 turns this fusion off alone (GGML_CUDA_DISABLE_FUSION turns off every fusion)
-    static const bool off = [] { const char * s = getenv("GGML_CUDA_MUL_GATHERED"); return s != nullptr && atoi(s) == 0; }();
-    if (off) {
-        return 0;
-    }
-    ggml_tensor * node = cgraph->nodes[i];
-
-    // the MUL of a gather that was skipped: compute the product from the table
-    if (node->op == GGML_OP_MUL && !g_deferred_gathers.empty()) {
-        for (int s = 0; s < 2; ++s) {
-            const ggml_tensor * rs = node->src[s];
-            if (rs && rs->op == GGML_OP_RESHAPE && rs->src[0] && g_deferred_gathers.count(rs->src[0])) {
-                const ggml_tensor * gr = rs->src[0];
-                const ggml_tensor * a  = mul_operand(node, rs, gr);
-                GGML_ASSERT(a != nullptr && "a deferred gather's MUL changed shape");
-                launch(ctx, gr, rs, a, node);
-                g_deferred_gathers.erase(gr);
-                return -1;
-            }
+    static const bool off = [] {
+        const char * s = getenv("GGML_CUDA_MUL_GATHERED");
+        const bool v = s != nullptr && atoi(s) == 0;
+        if (v) {
+            std::fprintf(stderr, "ggml_cuda: GGML_CUDA_MUL_GATHERED=0: the S1_32 scale gathers are not fused\n");
         }
-        return 0;
-    }
+        return v;
+    }();
 
-    if (node->op != GGML_OP_GET_ROWS || !gather_ok(node) || (node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
-            !ggml_node_has_n_uses(cgraph, i, 1)) {
+    ggml_tensor * node = cgraph->nodes[i];
+    if (node->op != GGML_OP_GET_ROWS || (node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
         return 0;
     }
-    // its only consumer is a RESHAPE, whose only consumer is a MUL, within the next 64 nodes
-    int rs_i = -1;
+    // a candidate (counted): a GET_ROWS whose result is reshaped (within the next 64 nodes); it fuses when the RESHAPE's
+    // only consumer is a matching MUL
+    int rs_i = -1, use_i = -1;
     for (int j = i + 1; j < cgraph->n_nodes && j <= i + 64; ++j) {
         const ggml_tensor * t = cgraph->nodes[j];
         if (rs_i < 0) {
             if (t->op == GGML_OP_RESHAPE && t->src[0] == node) {
-                // the RESHAPE is a view of the gather, and ggml_node_has_n_uses refuses every view (it returned false
-                // here for every bank, so this fusion never ran): check its own use count and output flag instead
-                if (ggml_node_get_use_count(cgraph, j) != 1 || (t->flags & GGML_TENSOR_FLAG_OUTPUT)) {
-                    return 0;
-                }
                 rs_i = j;
             }
             continue;
         }
-        const ggml_tensor * rs = cgraph->nodes[rs_i];
-        if (t->src[0] == rs || t->src[1] == rs) {
-            if ((t->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 || mul_operand(t, rs, node) == nullptr) {
-                return 0;
-            }
-            if (rs_i == i + 1 && j == i + 2) {
-                // adjacent: compute here and skip the RESHAPE and the MUL
-                launch(ctx, node, rs, mul_operand(t, rs, node), cgraph->nodes[j]);
-                return 2;
-            }
-            // the MUL comes later (its other operand may not exist yet): skip this gather, the MUL computes it
-            g_deferred_gathers.insert(node);
-            return -1;
+        if (t->src[0] == cgraph->nodes[rs_i] || t->src[1] == cgraph->nodes[rs_i]) {
+            use_i = j;
+            break;
         }
     }
-    return 0;
+    if (rs_i < 0) {
+        return 0;   // not a scale gather (token embeddings, output rows)
+    }
+    const int mul_i = use_i >= 0 && cgraph->nodes[use_i]->op == GGML_OP_MUL ? use_i : -1;
+    if (mul_i < 0) {
+        count(false);
+        return 0;
+    }
+    const ggml_tensor * rs  = cgraph->nodes[rs_i];
+    ggml_tensor       * mul = cgraph->nodes[mul_i];
+
+    bool ok = fusion_allowed && !off && gather_ok(node) && ggml_node_has_n_uses(cgraph, i, 1) &&
+        // the RESHAPE is a view of the gather: ggml_node_has_n_uses refuses every view, so check its count directly
+        ggml_node_get_use_count(cgraph, rs_i) == 1 && (rs->flags & GGML_TENSOR_FLAG_OUTPUT) == 0 &&
+        (mul->flags & GGML_TENSOR_FLAG_COMPUTE) != 0 && mul_operand(mul, rs, node) != nullptr;
+    // computed here, at the gather: every node between must be a view or no-op, so the MUL's other operand already
+    // exists and nothing in between needs the gathered rows
+    for (int j = i + 1; ok && j < mul_i; ++j) {
+        ok = is_view_or_noop(cgraph->nodes[j]);
+    }
+    count(ok);
+    if (!ok) {
+        return 0;
+    }
+    launch(ctx, node, rs, mul_operand(mul, rs, node), mul);
+    return mul_i - i;
 }

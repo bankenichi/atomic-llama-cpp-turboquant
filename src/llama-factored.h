@@ -49,7 +49,12 @@ static inline llm_factored_mm_id_result llm_build_factored_mm_id(
     sp = ggml_reshape_3d(ctx, sp, n_in, n_used, n_tokens);
 
     llm_factored_mm_id_result res;
-    res.x_scaled   = ggml_mul(ctx, sp, cur);                       // cur broadcasts over the slots when it has one
+    // Operand order fixes where the graph puts the gather: ggml visits a node's first source first, so with the
+    // per-slot input first (the down bank: the GLU output) the gather lands right before this MUL, and the CUDA
+    // backend computes gather and product in one kernel (mul-gathered.cuh). A broadcast input ([n_in, 1, n_tokens], the
+    // gate-up bank) must be the second operand; it is computed earlier anyway (the router reads it), so only views lie
+    // between the gather and the MUL. The product is the same either way (one F32 multiply, commutative).
+    res.x_scaled   = cur->ne[1] == n_used ? ggml_mul(ctx, cur, sp) : ggml_mul(ctx, sp, cur);
     res.z          = ggml_mul_mat_id(ctx, v, res.x_scaled, ids);
     res.y_unscaled = ggml_mul_mat_id(ctx, u, res.z, ids);
 

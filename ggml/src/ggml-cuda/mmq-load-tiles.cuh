@@ -117,6 +117,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) // S1_32: built and run on CUDA only (tested at cc 12.0)
 // moeq sign factors (S1_32): each 32-sign block expands, as Q1_0's 32-value chunks do, into 8 ints of +-1 bytes in the
 // Q8_0 tile layout; the per-32 scale is 1 (the bank's scales are separate tensors). The Q8_0 x q8_1 MMA / dp4a dot
 // then sums exactly in int32: per 32-value block at most 32*127 = 4064 in magnitude.
@@ -203,6 +204,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
+#endif // S1_32 CUDA only
 
 template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q2_0(
         const char * __restrict__ x, const char * __restrict__ x_gate, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {

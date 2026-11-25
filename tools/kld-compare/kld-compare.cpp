@@ -49,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -333,7 +334,8 @@ static void usage(const char * argv0) {
     std::fprintf(stderr,
         "usage: %s [-fa on|off|auto] [-dot q8|f32|f32_v|f32_u] [-ngl N] [-ub N] -m MODEL.gguf [...] -m MODEL.gguf ...\n"
         "          -f TEXT [-c 2048] [-t 8] [--chunks N] [--positions P] [--head H] [--no-middle] [--pairs 0-1,...]\n"
-        "          [--capture REGEX] [--capture-windows N] [--no-repack] [-o OUT.json]\n"
+        "          [--capture REGEX] [--capture-windows N] [--no-repack] [--router-census OUT.csv] [-o OUT.json]
+"
         "  -fa, -dot, -ngl and -ub apply to the models that follow them; every pair (i < j) is compared as\n"
         "  KL(model i || model j) unless --pairs lists the pairs\n", argv0);
 }
@@ -380,6 +382,7 @@ int main(int argc, char ** argv) {
     std::vector<int> window_list;   // --windows: decode only these windows (and capture all of them)
     bool capture_detail = false;
     std::string print_re_s;         // --print: token 0's values of these captured tensors
+    std::string census_path;        // --router-census: per pair, window, position and layer, the router's top-k agreement
     bool no_middle = false;
     bool repack = true;  // --no-repack: weights stay in the mapped file, so two models of one file share its pages
     for (int i = 1; i < argc; ++i) {
@@ -422,6 +425,7 @@ int main(int argc, char ** argv) {
         else if (a == "--capture-windows") { capture_windows = std::atoi(next()); }
         else if (a == "--capture-detail")  { capture_detail = true; }
         else if (a == "--print")           { print_re_s = next(); }
+        else if (a == "--router-census")   { census_path = next(); }
         else if (a == "--windows") {
             std::stringstream ws(next());
             std::string item;
@@ -562,6 +566,20 @@ int main(int argc, char ** argv) {
     }
     std::vector<pos_result> res(n_cmp);
 
+    // --router-census: one line per pair, window, compared position and layer, from the captured ffn_moe_probs-L and
+    // ffn_moe_topk-L of both models: the reference's gap between its k-th and (k+1)-th log-probability, the same for
+    // the candidate, whether the two top-k sets differ, and the standard deviation over the experts of the difference
+    // of the two log-probabilities (the router's noise between the two models at that position)
+    FILE * census = nullptr;
+    if (!census_path.empty()) {
+        census = std::fopen(census_path.c_str(), "w");
+        if (!census) {
+            std::fprintf(stderr, "cannot write %s\n", census_path.c_str());
+            return 1;
+        }
+        std::fprintf(census, "ref,cand,window,pos,layer,k,gap_ref,gap_cand,flip,sd\n");
+    }
+
     for (int w = 0; w < n_chunks; ++w) {
         if (!window_list.empty() && std::find(window_list.begin(), window_list.end(), w) == window_list.end()) {
             continue;
@@ -669,6 +687,59 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
+            if (capturing && census) {
+                const auto & ta = captures[pa.i].tensors;
+                const auto & tb = captures[pa.j].tensors;
+                for (const auto & kv : ta) {
+                    if (kv.first.rfind("ffn_moe_probs-", 0) != 0) {
+                        continue;
+                    }
+                    const std::string layer = kv.first.substr(std::strlen("ffn_moe_probs-"));
+                    auto pb = tb.find(kv.first);
+                    auto ka = ta.find("ffn_moe_topk-" + layer);
+                    auto kb = tb.find("ffn_moe_topk-" + layer);
+                    if (pb == tb.end() || ka == ta.end() || kb == tb.end() || kv.second.size() != pb->second.size() ||
+                            kv.second.size() % n_eval != 0 || ka->second.size() % n_eval != 0 || ka->second.size() != kb->second.size()) {
+                        continue;
+                    }
+                    const size_t ne = kv.second.size()/n_eval;   // experts
+                    const size_t k  = ka->second.size()/n_eval;  // experts used
+                    if (k == 0 || k >= ne) {
+                        continue;
+                    }
+                    std::vector<float> la(ne), lb(ne), sa(ne), sb(ne);
+                    for (int p = 0; p < n_cmp; ++p) {
+                        if (!compared(p)) {
+                            continue;
+                        }
+                        const float * qa = kv.second.data() + size_t(p)*ne;
+                        const float * qb = pb->second.data() + size_t(p)*ne;
+                        double sum = 0.0, sum2 = 0.0;
+                        for (size_t e = 0; e < ne; ++e) {
+                            la[e] = std::log(std::max(qa[e], 1e-30f));
+                            lb[e] = std::log(std::max(qb[e], 1e-30f));
+                            const double d = double(lb[e]) - double(la[e]);
+                            sum += d;
+                            sum2 += d*d;
+                        }
+                        const double mean = sum/ne;
+                        const double sd = std::sqrt(std::max(0.0, sum2/ne - mean*mean));
+                        sa = la;
+                        sb = lb;
+                        std::nth_element(sa.begin(), sa.begin() + k, sa.end(), std::greater<float>());
+                        std::nth_element(sb.begin(), sb.begin() + k, sb.end(), std::greater<float>());
+                        const float kth_a = *std::min_element(sa.begin(), sa.begin() + k), next_a = sa[k];
+                        const float kth_b = *std::min_element(sb.begin(), sb.begin() + k), next_b = sb[k];
+                        std::vector<int32_t> ea(k), eb(k);
+                        std::memcpy(ea.data(), ka->second.data() + size_t(p)*k, k*sizeof(int32_t));
+                        std::memcpy(eb.data(), kb->second.data() + size_t(p)*k, k*sizeof(int32_t));
+                        std::sort(ea.begin(), ea.end());
+                        std::sort(eb.begin(), eb.end());
+                        std::fprintf(census, "%d,%d,%d,%d,%s,%zu,%.6g,%.6g,%d,%.6g\n", pa.i, pa.j, w, p, layer.c_str(), k,
+                                     kth_a - next_a, kth_b - next_b, ea != eb ? 1 : 0, sd);
+                    }
+                }
+            }
         }
         if ((w + 1) % 10 == 0 || w + 1 == n_chunks) {
             std::printf("[%3d/%d]", w + 1, n_chunks);
@@ -687,6 +758,10 @@ int main(int argc, char ** argv) {
             std::printf("\n");
             std::fflush(stdout);
         }
+    }
+
+    if (census) {
+        std::fclose(census);
     }
 
     std::ofstream o;

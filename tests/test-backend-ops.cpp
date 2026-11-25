@@ -7235,34 +7235,55 @@ struct test_mul_mat_id_large : public test_mul_mat_id {
 };
 
 // moeq binary-factor scale: an F16 table [n, E] gathered by flat expert ids [U*T], reshaped to [n, U, T] and multiplied
-// with activations [n, U or 1, T] (CUDA fuses the three into one kernel; the result must equal the unfused ops')
+// with activations [n, U or 1, T]. CUDA fuses the three into one kernel when only views lie between the gather and the
+// MUL; the result must equal the unfused ops' exactly (one F16-to-F32 conversion and one F32 multiply per element, so
+// the tolerance is 0), and on CUDA the fusion counters must show that the case fused, or fell back, as expected.
 struct test_mul_gathered_rows : public test_case {
+    enum mode_t { ADJACENT = 0, VIEWS_BETWEEN = 1, NODE_BETWEEN = 2, F32_TABLE = 3, CONT_BEFORE_MUL = 4 };
     const int64_t n, E, U, T;
     const bool bcast;   // activations broadcast over the slots ([n, 1, T])
     const bool swap;    // gathered rows as the MUL's first operand (required with bcast: ggml_mul broadcasts its second operand only)
-    const bool deferred; // another node between the gather and its MUL (CUDA skips the gather, the MUL computes it)
+    const mode_t mode;
     std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "MUL_GATHERED_ROWS"; }
-    std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap) + ",deferred=" + std::to_string(deferred); }
+    std::string vars() override { return VARS_TO_STR6(n, E, U, T, bcast, swap) + ",mode=" + std::to_string((int) mode); }
     bool run_whole_graph() override { return true; }
-    test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap, bool deferred = false)
-        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap), deferred(deferred) { GGML_ASSERT(swap || !bcast); }
+    bool expect_fused() const { return mode == ADJACENT || mode == VIEWS_BETWEEN; }
+    test_mul_gathered_rows(int64_t n, int64_t E, int64_t U, int64_t T, bool bcast, bool swap, mode_t mode = ADJACENT)
+        : n(n), E(E), U(U), T(T), bcast(bcast), swap(swap), mode(mode) {
+        GGML_ASSERT(swap || !bcast);
+        GGML_ASSERT(swap || (mode != VIEWS_BETWEEN && mode != NODE_BETWEEN)); // the in-between node must follow the gather
+    }
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * table = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n, E);
+        ggml_tensor * table = ggml_new_tensor_2d(ctx, mode == F32_TABLE ? GGML_TYPE_F32 : GGML_TYPE_F16, n, E);
         ggml_set_name(table, "table");
         ggml_tensor * ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, U*T);
         ggml_set_name(ids, "ids");
-        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, bcast ? 1 : U, T);
+        const int64_t ua = bcast ? 1 : U;
+        // VIEWS_BETWEEN: the activations come as a 2-D tensor reshaped after the gather, as the model's normed input does
+        ggml_tensor * a = mode == VIEWS_BETWEEN ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, ua*T)
+                                                : ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, ua, T);
         ggml_set_name(a, "a");
         ggml_tensor * g = ggml_get_rows(ctx, table, ids);
         ggml_tensor * r = ggml_reshape_3d(ctx, g, n, U, T);
-        if (deferred) {
-            a = ggml_scale(ctx, a, 0.5f);   // built after the gather: the graph runs it between the gather and the MUL
+        if (mode == VIEWS_BETWEEN) {
+            a = ggml_reshape_3d(ctx, a, n, ua, T);   // built after the gather: a view between the gather and the MUL
+        }
+        if (mode == NODE_BETWEEN) {
+            a = ggml_scale(ctx, a, 0.5f);           // built after the gather: a computed node between them
+        }
+        if (mode == CONT_BEFORE_MUL) {
+            r = ggml_cont(ctx, r);                  // the RESHAPE's consumer is not the MUL
         }
         ggml_tensor * out = swap ? ggml_mul(ctx, r, a) : ggml_mul(ctx, a, r);
         ggml_set_name(out, "out");
         return out;
     }
+    static ggml_backend_reg_t cuda_reg() { return ggml_backend_reg_by_name("CUDA"); }
     void initialize_tensors(ggml_context * ctx) override {
+        if (ggml_backend_reg_t reg = cuda_reg()) {
+            auto reset = (void (*)()) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_mul_gathered_reset");
+            if (reset) { reset(); }
+        }
         std::mt19937 rng(77);
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (t->type == GGML_TYPE_I32) {
@@ -7273,6 +7294,27 @@ struct test_mul_gathered_rows : public test_case {
                 init_tensor_uniform(t, -2000.0f, 2000.0f);
             }
         }
+    }
+    // called after the graph ran on the backend under test: exact agreement, and on CUDA the counters as expected
+    double max_err(ggml_backend_t backend) override {
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
+        if (strcmp(ggml_backend_reg_name(reg), "CUDA") != 0) {
+            return 0.0;
+        }
+        auto stats = (void (*)(int64_t *, int64_t *, int64_t *)) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_mul_gathered_stats");
+        if (!stats) {
+            printf("[MUL_GATHERED_ROWS] no fusion counters in this CUDA build ");
+            return -1.0;
+        }
+        int64_t fused = 0, unfused = 0, graphs = 0;
+        stats(&fused, &unfused, &graphs);
+        const bool ok = expect_fused() ? (fused >= 1 && unfused == 0) : (fused == 0 && unfused >= 1);
+        if (!ok) {
+            printf("[MUL_GATHERED_ROWS] expected %s, counters fused %lld unfused %lld ", expect_fused() ? "fused" : "unfused",
+                (long long) fused, (long long) unfused);
+            return -1.0;
+        }
+        return 0.0;
     }
 };
 
@@ -13665,15 +13707,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // tiles (16..128) and the next tile (129), 512; both products of Granite-1B's in-bank and Qwen3.6's out-bank
         // (the stage-2 F16 GEMM overflow passed every small-input case above)
         // the scales' fused gather-multiply (CUDA) at the bank widths, broadcast and per-slot activations, both orders
+        // the model's three placements: s_pre of the in-bank (broadcast input reshaped after the gather: views between),
+        // s_pre of the out-bank (per-slot input first: adjacent), s_post (adjacent), and the gathered rows first
+        using mg = test_mul_gathered_rows;
         for (int64_t T : { 1, 8, 9, 64, 512 }) {
-            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true));
-            test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, false));
-            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, false, true));
+            test_cases.emplace_back(new mg(1024, 32, 8, T, true,  true,  mg::VIEWS_BETWEEN));
+            test_cases.emplace_back(new mg( 512, 32, 8, T, false, false, mg::ADJACENT));
+            test_cases.emplace_back(new mg(1024, 32, 8, T, false, true,  mg::ADJACENT));
+            test_cases.emplace_back(new mg(1024, 32, 8, T, true,  true,  mg::ADJACENT));
         }
-        test_cases.emplace_back(new test_mul_gathered_rows(2048, 256, 8, 64, true, true));
+        test_cases.emplace_back(new mg(2048, 256, 8, 64, true, true, mg::VIEWS_BETWEEN));
+        // shapes it must not fuse: computed unfused, exactly, and counted as such
         for (int64_t T : { 1, 9, 512 }) {
-            test_cases.emplace_back(new test_mul_gathered_rows(1024, 32, 8, T, true,  true, true));
-            test_cases.emplace_back(new test_mul_gathered_rows( 512, 32, 8, T, false, true, true));
+            test_cases.emplace_back(new mg(1024, 32, 8, T, true,  true,  mg::NODE_BETWEEN));
+            test_cases.emplace_back(new mg( 512, 32, 8, T, false, true,  mg::NODE_BETWEEN));
+            test_cases.emplace_back(new mg( 512, 32, 8, T, false, false, mg::F32_TABLE));
+            test_cases.emplace_back(new mg(1024, 32, 8, T, true,  true,  mg::CONT_BEFORE_MUL));
         }
         // 2-D MUL_MAT at the dense Qwen3.5-9B bank widths and ranks (Task 33: K = 4096, 3488, 12288, 3040; 3488 and 3040
         // are not multiples of the tiled kernel's 256-value step), large activations, both sides of every boundary
@@ -13696,6 +13745,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             for (int n : { 1, 8, 9, 16, 32, 64, 128, 129, 512 }) {
                 test_cases.emplace_back(new test_mul_mat_id_large(GGML_TYPE_S1_32, s.n_mats, s.n_used, s.m, n, s.k, 2000.0f));
             }
+        }
+        // K = 2048 in-banks with large activations (Qwen3.6 rank 416 over 256 experts, OLMoE-sized 64 experts), and ten
+        // times the activation scale on Granite's in-bank (stage-3 review, finding 15)
+        const factor_step large_k2048[] = { { 256, 8, 416, 2048 }, { 64, 8, 1024, 2048 } };
+        for (const factor_step & s : large_k2048) {
+            for (int n : { 1, 8, 9, 64, 512 }) {
+                test_cases.emplace_back(new test_mul_mat_id_large(GGML_TYPE_S1_32, s.n_mats, s.n_used, s.m, n, s.k, 2000.0f));
+            }
+        }
+        for (int n : { 1, 8, 9, 64, 512 }) {
+            test_cases.emplace_back(new test_mul_mat_id_large(GGML_TYPE_S1_32, 32, 8, 480, n, 1024, 20000.0f));
         }
     }
 
