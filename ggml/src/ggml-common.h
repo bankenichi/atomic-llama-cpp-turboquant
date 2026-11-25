@@ -96,6 +96,10 @@ typedef sycl::half2 ggml_half2;
 #define QI1_0 (QK1_0 / 32)
 #define QR1_0 1
 
+// S1_32 (moeq sign factors): one uint32 of 32 signs per block
+#define QI_S1_32 (QK_S1_32 / 32)
+#define QR_S1_32 1
+
 #define QI2_0 (QK2_0 / 32)
 #define QR2_0 1
 

@@ -2,8 +2,8 @@
 // exactly from the models' logits in one process.
 //
 //   llama-kld-compare [per-model options] -m A.gguf [per-model options] -m B.gguf [...] -f TEXT [-c 2048] [-t 8]
-//                     [--chunks N] [--positions P] [--head H] [--pairs 0-1,...] [--capture REGEX]
-//                     [--capture-windows N] [-o OUT.json]
+//                     [--chunks N] [--positions P] [--head H] [--no-middle] [--pairs 0-1,...]
+//                     [--capture REGEX] [--capture-windows N] [-o OUT.json]
 //
 // Every pair (i < j) is compared as KL(model i || model j); each model decodes each window once.
 //
@@ -15,7 +15,9 @@
 // Windows are llama-perplexity's: the text tokenized with the vocabulary's special tokens, cut into n_ctx-token
 // chunks, the first token of each replaced by BOS when the vocabulary adds BOS. The logits at position p predict
 // token p+1; positions 0 .. n_ctx-2 are compared, KL per position in double precision. With --positions P only the
-// first P tokens of each window are decoded and positions 0 .. P-1 compared (P < n_ctx).
+// first P tokens of each window are decoded and positions 0 .. P-1 compared (P < n_ctx). --no-middle compares only the
+// head and the protocol positions (the KL costs about a second per pair and window on 16 threads; this halves it);
+// "all" then covers those positions only and the per-position values of the others are null.
 // Reported for four position sets: "protocol" (n_ctx/2 .. n_ctx-2, what llama-perplexity scores; empty with a short
 // --positions), "pos0" (one value per window), "head" (positions 0 .. H-1, default 64) and "all"; each with mean,
 // median, 99th percentile and maximum (percentiles interpolated as in llama-perplexity), the share of positions whose
@@ -31,9 +33,11 @@
 // The same file with the same -ngl is loaded once and shared by its contexts.
 //
 // --capture REGEX records, during the first --capture-windows windows (default 4), every F32 graph tensor whose name
-// matches (e.g. "ffn_moe_(gate_up|down)(_xs|_z|_uz)?-") in every model, and compares each pair's tensors of the same
-// name: normalized squared error sum((b-a)^2)/sum(a^2) and the largest |b-a| relative to max|a|, summarized per
-// tensor kind (the name without its layer number) as median and maximum over layers and windows.
+// matches (e.g. "ffn_moe_(gate_up|down)(_xs|_z|_uz)?-|ffn_moe_topk-") in every model, and compares each pair's tensors
+// of the same name: normalized squared error sum((b-a)^2)/sum(a^2) and the largest |b-a| relative to max|a|,
+// summarized per tensor kind (the name without its layer number) as median and maximum over layers and windows, and
+// the median at layer 0. Expert tensors are compared row by row only where both models routed the row's slot to the
+// same expert (ffn_moe_topk-N captured too; compare_captured), and the share of such rows is reported.
 #include "common.h"
 #include "llama.h"
 #include "ggml-backend.h"
@@ -171,21 +175,27 @@ struct capture_state {
     std::map<std::string, std::vector<float>> tensors;
 };
 
+// F32 tensors, and I32 ones (the router's chosen experts, ffn_moe_topk-N) kept bit for bit in the same float storage
 static bool capture_cb(ggml_tensor * t, bool ask, void * user_data) {
     capture_state * st = (capture_state *) user_data;
+    const bool type_ok = t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_I32;
     if (ask) {
-        return st->active && t->type == GGML_TYPE_F32 && std::regex_search(t->name, *st->re);
+        return st->active && type_ok && std::regex_search(t->name, *st->re);
     }
-    if (!st->active || t->type != GGML_TYPE_F32 || !std::regex_search(t->name, *st->re)) {
+    if (!st->active || !type_ok || !std::regex_search(t->name, *st->re)) {
         return true;
     }
+    static_assert(sizeof(float) == sizeof(int32_t), "ids are kept in float storage");
+    // a window decoded in several ubatches computes each tensor once per ubatch: its tokens (the outermost dimension
+    // of the tensors captured here) are appended in order
     std::vector<float> & dst = st->tensors[t->name];
-    dst.resize(ggml_nelements(t));
+    const size_t base = dst.size();
+    dst.resize(base + ggml_nelements(t));
     if (ggml_is_contiguous(t)) {
-        ggml_backend_tensor_get(t, dst.data(), 0, ggml_nbytes(t));
+        ggml_backend_tensor_get(t, dst.data() + base, 0, ggml_nbytes(t));
     } else {
         // gather row by row
-        size_t k = 0;
+        size_t k = base;
         for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
             for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
                 for (int64_t i1 = 0; i1 < t->ne[1]; ++i1) {
@@ -206,15 +216,77 @@ static bool capture_cb(ggml_tensor * t, bool ask, void * user_data) {
 }
 
 struct capture_acc {
-    std::vector<float> nmse, maxrel;
+    std::vector<float> nmse, maxrel, layer0;
+    double matched = 0.0, rows = 0.0;   // rows whose expert agrees in both models, of all rows
     std::string worst;
     float worst_nmse = -1.0f;
 };
 
+// The expert tensors of a MoE layer are [n, n_used, n_tokens]: row (slot k, token t) belongs to the k-th most
+// probable expert of token t. When the two models' routers order two near-equal experts differently, or choose
+// another, the same row holds different experts' values; so a row is compared only when ffn_moe_topk-N (the same
+// layer's chosen expert ids, [n_used, n_tokens]) agrees in both models. Returns false if the tensors do not match.
+static bool compare_captured(const std::string & name, const std::vector<float> & a, const std::vector<float> & b,
+                             const std::map<std::string, std::vector<float>> & ta,
+                             const std::map<std::string, std::vector<float>> & tb, int window,
+                             std::map<std::string, capture_acc> & out) {
+    const size_t dash = name.rfind('-');
+    const std::string kind = dash == std::string::npos ? name : name.substr(0, dash);
+    const std::string layer = dash == std::string::npos ? "" : name.substr(dash + 1);
+    if (kind == "ffn_moe_topk" || a.size() != b.size() || a.empty()) {
+        return false;
+    }
+    size_t row_len = a.size(), n_rows = 1;
+    std::vector<bool> keep(1, true);
+    auto ia = ta.find("ffn_moe_topk-" + layer), ib = tb.find("ffn_moe_topk-" + layer);
+    if (ia != ta.end() && ib != tb.end() && ia->second.size() == ib->second.size() && !ia->second.empty() &&
+            a.size() % ia->second.size() == 0) {
+        n_rows  = ia->second.size();
+        row_len = a.size()/n_rows;
+        keep.assign(n_rows, false);
+        for (size_t r = 0; r < n_rows; ++r) {
+            keep[r] = std::memcmp(&ia->second[r], &ib->second[r], sizeof(float)) == 0;
+        }
+    }
+    double num = 0.0, den = 0.0, maxd = 0.0, maxa = 0.0;
+    size_t n_keep = 0;
+    for (size_t r = 0; r < n_rows; ++r) {
+        if (!keep[r]) {
+            continue;
+        }
+        n_keep++;
+        for (size_t q = r*row_len; q < (r + 1)*row_len; ++q) {
+            const double d = (double) b[q] - a[q];
+            num += d*d;
+            den += (double) a[q]*a[q];
+            maxd = std::max(maxd, std::fabs(d));
+            maxa = std::max(maxa, std::fabs((double) a[q]));
+        }
+    }
+    capture_acc & acc = out[kind];
+    acc.rows += n_rows;
+    acc.matched += n_keep;
+    if (n_keep == 0) {
+        return true;
+    }
+    const float e  = (float) (den > 0 ? num/den : num);
+    const float mr = (float) (maxa > 0 ? maxd/maxa : maxd);
+    acc.nmse.push_back(std::isfinite(e) ? e : INFINITY);
+    acc.maxrel.push_back(std::isfinite(mr) ? mr : INFINITY);
+    if (layer == "0") {
+        acc.layer0.push_back(std::isfinite(e) ? e : INFINITY);
+    }
+    if (!(e <= acc.worst_nmse)) {
+        acc.worst_nmse = e;
+        acc.worst = name + " window " + std::to_string(window);
+    }
+    return true;
+}
+
 static void usage(const char * argv0) {
     std::fprintf(stderr,
         "usage: %s [-fa on|off|auto] [-dot q8|f32|f32_v|f32_u] [-ngl N] [-ub N] -m MODEL.gguf [...] -m MODEL.gguf ...\n"
-        "          -f TEXT [-c 2048] [-t 8] [--chunks N] [--positions P] [--head H] [--pairs 0-1,0-2,...]\n"
+        "          -f TEXT [-c 2048] [-t 8] [--chunks N] [--positions P] [--head H] [--no-middle] [--pairs 0-1,...]\n"
         "          [--capture REGEX] [--capture-windows N] [-o OUT.json]\n"
         "  -fa, -dot, -ngl and -ub apply to the models that follow them; every pair (i < j) is compared as\n"
         "  KL(model i || model j) unless --pairs lists the pairs\n", argv0);
@@ -258,6 +330,7 @@ int main(int argc, char ** argv) {
     std::vector<std::pair<int, int>> pair_list;
     std::string path_text, path_out, capture_re;
     int n_ctx = 2048, n_threads = 8, n_chunks_max = -1, n_positions = -1, n_head = 64, capture_windows = 4;
+    bool no_middle = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char * {
@@ -292,6 +365,7 @@ int main(int argc, char ** argv) {
         else if (a == "--chunks")          { n_chunks_max = std::atoi(next()); }
         else if (a == "--positions")       { n_positions = std::atoi(next()); }
         else if (a == "--head")            { n_head = std::atoi(next()); }
+        else if (a == "--no-middle")       { no_middle = true; }
         else if (a == "--capture")         { capture_re = next(); }
         else if (a == "--capture-windows") { capture_windows = std::atoi(next()); }
         else { usage(argv[0]); return 1; }
@@ -387,6 +461,7 @@ int main(int argc, char ** argv) {
     }
     const bool add_bos = llama_vocab_get_add_bos(vocab);
     const int first = n_ctx/2;
+    auto compared = [&](int p) { return !no_middle || p < n_head || p >= first; };
     std::printf("%zu tokens, %d windows of %d, add_bos %d, %d tokens decoded per window, positions 0..%d compared "
                 "(protocol %d..%d, head 0..%d), %zu models\n", tokens.size(), n_chunks, n_ctx, (int) add_bos, n_eval,
                 n_cmp - 1, first, n_ctx - 2, n_head - 1, n_models);
@@ -452,6 +527,9 @@ int main(int argc, char ** argv) {
             for (int k = 0; k < n_workers; ++k) {
                 workers.emplace_back([&, k]() {
                     for (int p = k; p < n_cmp; p += n_workers) {
+                        if (!compared(p)) {
+                            continue;
+                        }
                         res[p] = compare_position(la + size_t(p)*n_vocab, lb + size_t(p)*n_vocab, n_vocab, win[p + 1]);
                     }
                 });
@@ -462,6 +540,9 @@ int main(int argc, char ** argv) {
             double wsum = 0.0;
             int wn = 0;
             for (int p = 0; p < n_cmp; ++p) {
+                if (!compared(p)) {
+                    continue;
+                }
                 const pos_result & r = res[p];
                 pa.pos_sum[p] += r.kld;
                 pa.pos_max[p] = std::max(pa.pos_max[p], r.kld);
@@ -494,29 +575,8 @@ int main(int argc, char ** argv) {
                 const auto & tb = captures[pa.j].tensors;
                 for (const auto & kv : ta) {
                     auto it = tb.find(kv.first);
-                    if (it == tb.end() || it->second.size() != kv.second.size()) {
-                        continue;
-                    }
-                    const std::vector<float> & a = kv.second;
-                    const std::vector<float> & b = it->second;
-                    double num = 0.0, den = 0.0, maxd = 0.0, maxa = 0.0;
-                    for (size_t q = 0; q < a.size(); ++q) {
-                        const double d = (double) b[q] - a[q];
-                        num += d*d;
-                        den += (double) a[q]*a[q];
-                        maxd = std::max(maxd, std::fabs(d));
-                        maxa = std::max(maxa, std::fabs((double) a[q]));
-                    }
-                    const float e = (float) (den > 0 ? num/den : num);
-                    const float mr = (float) (maxa > 0 ? maxd/maxa : maxd);
-                    const size_t dash = kv.first.rfind('-');
-                    const std::string kind = dash == std::string::npos ? kv.first : kv.first.substr(0, dash);
-                    capture_acc & acc = pa.captures[kind];
-                    acc.nmse.push_back(std::isfinite(e) ? e : INFINITY);
-                    acc.maxrel.push_back(std::isfinite(mr) ? mr : INFINITY);
-                    if (!(e <= acc.worst_nmse)) {
-                        acc.worst_nmse = e;
-                        acc.worst = kv.first + " window " + std::to_string(w);
+                    if (it != tb.end()) {
+                        compare_captured(kv.first, kv.second, it->second, ta, tb, w, pa.captures);
                     }
                 }
             }
@@ -545,7 +605,8 @@ int main(int argc, char ** argv) {
         o.open(path_out);
         o.precision(9);
         o << "{\n  \"text\": \"" << path_text << "\",\n  \"n_ctx\": " << n_ctx << ",\n  \"windows\": " << n_chunks
-          << ",\n  \"tokens_per_window\": " << n_eval << ",\n  \"positions_compared\": " << n_cmp << ",\n  \"head\": " << n_head << ",\n";
+          << ",\n  \"tokens_per_window\": " << n_eval << ",\n  \"positions_compared\": " << n_cmp << ",\n  \"head\": " << n_head
+          << ",\n  \"no_middle\": " << (no_middle ? "true" : "false") << ",\n";
         o << "  \"s1_32_dot\": \"" << dot_name(env_mode) << "\",\n  \"threads\": " << n_threads << ",\n  \"models\": [";
         for (size_t m = 0; m < n_models; ++m) {
             const model_spec & s = specs[m];
@@ -568,14 +629,22 @@ int main(int argc, char ** argv) {
         std::vector<std::string> cap_json;
         for (auto & kv : pa.captures) {
             capture_acc & acc = kv.second;
-            std::vector<float> e = acc.nmse, mr = acc.maxrel;
+            if (acc.nmse.empty()) {
+                continue;
+            }
+            std::vector<float> e = acc.nmse, mr = acc.maxrel, l0 = acc.layer0;
             std::sort(e.begin(), e.end());
             std::sort(mr.begin(), mr.end());
-            std::printf("  tensor %-26s n %4zu  nmse median %.3e max %.3e  max|d|/max|a| median %.3e max %.3e  worst %s\n",
-                        kv.first.c_str(), e.size(), percentile(e, 0.5f), e.back(), percentile(mr, 0.5f), mr.back(), acc.worst.c_str());
+            std::sort(l0.begin(), l0.end());
+            const double matched = acc.rows > 0 ? acc.matched/acc.rows : NAN;
+            std::printf("  tensor %-22s n %4zu  rows matched %.4f  nmse median %.3e max %.3e  layer 0 median %.3e  "
+                        "max|d|/max|a| median %.3e max %.3e  worst %s\n", kv.first.c_str(), e.size(), matched,
+                        percentile(e, 0.5f), e.back(), percentile(l0, 0.5f), percentile(mr, 0.5f), mr.back(), acc.worst.c_str());
             std::ostringstream c;
-            c << "{\"kind\": \"" << kv.first << "\", \"n\": " << e.size() << ", \"nmse_median\": " << json_num(percentile(e, 0.5f))
-              << ", \"nmse_max\": " << json_num(e.back()) << ", \"maxrel_median\": " << json_num(percentile(mr, 0.5f))
+            c << "{\"kind\": \"" << kv.first << "\", \"n\": " << e.size() << ", \"rows_matched\": " << json_num(matched)
+              << ", \"nmse_median\": " << json_num(percentile(e, 0.5f)) << ", \"nmse_max\": " << json_num(e.back())
+              << ", \"nmse_layer0_median\": " << json_num(percentile(l0, 0.5f)) << ", \"nmse_layer0_max\": "
+              << json_num(l0.empty() ? NAN : l0.back()) << ", \"maxrel_median\": " << json_num(percentile(mr, 0.5f))
               << ", \"maxrel_max\": " << json_num(mr.back()) << ", \"worst\": \"" << acc.worst << "\"}";
             cap_json.push_back(c.str());
         }
@@ -592,11 +661,11 @@ int main(int argc, char ** argv) {
             }
             o << "],\n     \"position_mean\": [";
             for (size_t i = 0; i < pa.pos_sum.size(); ++i) {
-                o << (i ? ", " : "") << pa.pos_sum[i]/n_chunks;
+                o << (i ? ", " : "") << (compared((int) i) ? json_num(pa.pos_sum[i]/n_chunks) : "null");
             }
             o << "],\n     \"position_max\": [";
             for (size_t i = 0; i < pa.pos_max.size(); ++i) {
-                o << (i ? ", " : "") << pa.pos_max[i];
+                o << (i ? ", " : "") << (compared((int) i) ? json_num(pa.pos_max[i]) : "null");
             }
             o << "],\n     \"captures\": [";
             for (size_t i = 0; i < cap_json.size(); ++i) {
