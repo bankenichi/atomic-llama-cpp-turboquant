@@ -162,6 +162,10 @@ int main(int argc, char ** argv) {
     cp.n_threads       = n_threads;
     cp.n_threads_batch = n_threads;
     cp.flash_attn_type = fa;
+    // a CPU model stays on the CPU: with op offload (the default) a GPU build moves large-batch products of host
+    // weights to the GPU, so "the CPU path" would not be one (moeq Task 30, job S: the CPU Q8_0 and float runs came out
+    // identical because both ran their 64-token S1_32 products on the GPU)
+    cp.op_offload      = n_gpu_layers > 0;
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) {
         std::fprintf(stderr, "failed to create a context\n");
