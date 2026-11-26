@@ -64,8 +64,17 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
 
         LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells\n", __func__, kv_size);
 
+        // The indexer pool is read raw (CPU row gathers and the indexer op), while a turbo cache stores rotated,
+        // normalized blocks that only the attention path un-rotates. Keep the pool in q8_0 when the main cache
+        // is a turbo type; read raw from a turbo pool, the indexer's scores are wrong.
+        const bool turbo_k_idx = type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0;
+        const ggml_type type_k_idx = turbo_k_idx ? GGML_TYPE_Q8_0 : type_k;
+        if (turbo_k_idx) {
+            LLAMA_LOG_INFO("%s: indexer KV cache kept in q8_0 (turbo cache type requested)\n", __func__);
+        }
+
         return new llama_kv_cache(
-            model, no_alloc, hparams_idx, type_k, type_v, v_trans, offload, unified,
+            model, no_alloc, hparams_idx, type_k_idx, type_v, v_trans, offload, unified,
             kv_size, n_seq_max, n_swa, swa_type,
             nullptr, filter_idx, nullptr, nullptr, "idx_");
     }()) {}

@@ -5588,6 +5588,11 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_Q2_0:
         case GGML_TYPE_PQ2_0:
         case GGML_TYPE_PTQ1_0:
+        // turbo rows come back in the rotated domain (their to_float does not un-rotate), as from the CUDA
+        // gather; without these cases a CPU gather of a turbo KV tensor aborted
+        case GGML_TYPE_TURBO2_0:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
