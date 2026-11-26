@@ -21,6 +21,22 @@ static bool llama_kv_type_is_turbo(ggml_type type) {
     return type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
 }
 
+// The tensor type as a saved state names it. turbo4's codebook was replaced by the Lloyd-Max levels of N(0, 1/128);
+// a state written with the earlier table holds the same type id and row size but decodes at the wrong scale with
+// this one. turbo4 states written from here on carry a codebook-revision bit, so an earlier turbo4 state fails the
+// type check on load (the caller then recomputes the prompt) instead of being read wrongly. Other types: unchanged.
+static const int32_t LLAMA_KV_STATE_TURBO4_CODEBOOK_REV1 = 1 << 16;
+
+static int32_t llama_kv_state_type_id(ggml_type type) {
+    return (int32_t) type | (type == GGML_TYPE_TURBO4_0 ? LLAMA_KV_STATE_TURBO4_CODEBOOK_REV1 : 0);
+}
+
+static void llama_kv_state_type_hint(int32_t type_i, int32_t type_i_ref) {
+    if (type_i_ref == (int32_t) GGML_TYPE_TURBO4_0 && type_i == llama_kv_state_type_id(GGML_TYPE_TURBO4_0)) {
+        LLAMA_LOG_ERROR("%s: the state was saved with the earlier turbo4 codebook and cannot be read; discard it\n", __func__);
+    }
+}
+
 #ifndef INNERQ_MAX_CHANNELS
 #define INNERQ_MAX_CHANNELS 128
 #endif
@@ -2830,7 +2846,7 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
         auto * k = layer.k_stream[cr.strm];
 
         // Write key type
-        const int32_t k_type_i = (int32_t) k->type;
+        const int32_t k_type_i = llama_kv_state_type_id(k->type);
         io.write(&k_type_i, sizeof(k_type_i));
 
         // Write row size of key
@@ -2857,7 +2873,7 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
             }
 
             // Write value type
-            const int32_t v_type_i = (int32_t) v->type;
+            const int32_t v_type_i = llama_kv_state_type_id(v->type);
             io.write(&v_type_i, sizeof(v_type_i));
 
             // Write row size of value
@@ -2886,7 +2902,7 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
             }
 
             // Write value type
-            const int32_t v_type_i = (int32_t) v->type;
+            const int32_t v_type_i = llama_kv_state_type_id(v->type);
             io.write(&v_type_i, sizeof(v_type_i));
 
             // Write element size
@@ -3155,9 +3171,10 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
         // Read type of key
         int32_t k_type_i_ref;
         io.read(&k_type_i_ref, sizeof(k_type_i_ref));
-        const int32_t k_type_i = (int32_t) k->type;
+        const int32_t k_type_i = llama_kv_state_type_id(k->type);
         if (k_type_i != k_type_i_ref) {
             LLAMA_LOG_ERROR("%s: mismatched key type (%d != %d, layer %d)\n", __func__, k_type_i, k_type_i_ref, il);
+            llama_kv_state_type_hint(k_type_i, k_type_i_ref);
             return false;
         }
 
@@ -3189,9 +3206,10 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
             // Read type of value
             int32_t v_type_i_ref;
             io.read(&v_type_i_ref, sizeof(v_type_i_ref));
-            const int32_t v_type_i = (int32_t) v->type;
+            const int32_t v_type_i = llama_kv_state_type_id(v->type);
             if (v_type_i != v_type_i_ref) {
                 LLAMA_LOG_ERROR("%s: mismatched value type (%d != %d, layer %d)\n", __func__, v_type_i, v_type_i_ref, il);
+                llama_kv_state_type_hint(v_type_i, v_type_i_ref);
                 return false;
             }
 
@@ -3223,9 +3241,10 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
             // Read type of value
             int32_t v_type_i_ref;
             io.read(&v_type_i_ref, sizeof(v_type_i_ref));
-            const int32_t v_type_i = (int32_t) v->type;
+            const int32_t v_type_i = llama_kv_state_type_id(v->type);
             if (v_type_i != v_type_i_ref) {
                 LLAMA_LOG_ERROR("%s: mismatched value type (%d != %d, layer %d)\n", __func__, v_type_i, v_type_i_ref, il);
+                llama_kv_state_type_hint(v_type_i, v_type_i_ref);
                 return false;
             }
 

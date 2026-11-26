@@ -50,8 +50,13 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
 
     LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells\n", __func__, kv_size);
 
+    const ggml_type type_k_lid = llama_kv_indexer_key_type(type_k);   // q8_0 under a turbo key type
+    if (type_k_lid != type_k) {
+        LLAMA_LOG_INFO("%s: indexer KV cache kept in q8_0 (turbo cache type requested)\n", __func__);
+    }
+
     kv_lid = std::make_unique<llama_kv_cache>(
-            model, no_alloc, hparams_lid, type_k, type_v,
+            model, no_alloc, hparams_lid, type_k_lid, type_v,
             v_trans, offload, unified, kv_size, n_seq_max,
             n_swa, swa_type, nullptr, filter_lid, nullptr, nullptr, "", true);
 }

@@ -17,6 +17,14 @@ struct llama_context;
 // llama_kv_cache
 //
 
+// The key type of an indexer pool (hybrid-idx, DSA, MSA, DSV4 lightning indexer). An indexer reads its pool raw (row
+// gathers, the indexer op), while a turbo cache stores rotated, normalized blocks that only the attention path
+// un-rotates: read raw, the indexer's scores are wrong. Such a pool is kept in q8_0 when the main key type is turbo.
+inline ggml_type llama_kv_indexer_key_type(ggml_type type_k) {
+    const bool turbo = type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0;
+    return turbo ? GGML_TYPE_Q8_0 : type_k;
+}
+
 class llama_kv_cache : public llama_memory_i {
 public:
     struct stream_copy_info {
